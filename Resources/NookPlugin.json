@@ -8,5 +8,9 @@
     "Uses a dedicated installed Codex runtime and its own ChatGPT sign-in",
     "Sends your message and only the module context you select",
     "Proposes permitted module actions for your review"
-  ]
+  ],
+  "icon": {
+    "symbol": "bubble.left.and.bubble.right.fill",
+    "color": "8DE4C6"
+  }
 }
