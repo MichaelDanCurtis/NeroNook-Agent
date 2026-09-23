@@ -141,7 +141,7 @@ struct AgentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Label("Nero Agent", systemImage: "sparkles").font(.title2.bold()); Spacer(); Text(model.email == nil ? "Not connected" : "ChatGPT").font(.caption); Button { model.settingsVisible = true } label: { Image(systemName: "gearshape") } }
-            ScrollView { VStack(alignment: .leading, spacing: 16) { if !model.prompt.isEmpty { Text(model.prompt).foregroundStyle(.secondary) }; Text(model.reply.isEmpty ? "An assistant for your Nook. Connect your ChatGPT account to begin." : model.reply).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) } }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            ScrollView { VStack(alignment: .leading, spacing: 16) { if !model.prompt.isEmpty { Text(model.prompt).foregroundStyle(.secondary) }; Text(model.reply.isEmpty ? (model.busy ? "Thinking…" : model.email == nil ? "Connect your ChatGPT account in Settings to begin." : "Ready when you are. Ask a question below.") : model.reply).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) } }.frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack { TextField("Message to ChatGPT", text: $draft).textFieldStyle(.roundedBorder).onSubmit(send); Button("Send", action: send).disabled(model.email == nil || model.busy || draft.isEmpty); Button("Stop") { model.cancel() }.disabled(!model.busy) }
             Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }.padding(20).frame(width: 720, height: 405).preferredColorScheme(.dark).tint(.mint)
@@ -154,7 +154,7 @@ struct AgentView: View {
                     HStack {
                         Button(model.email == nil ? "Sign in with ChatGPT" : "Reconnect") { model.connect() }.disabled(model.connecting || model.busy)
                         if model.connecting { Button("Cancel sign-in") { model.cancelLogin() } }
-                        if model.email != nil { Button("Sign out") { model.signOut() }.disabled(model.busy) }
+                        if model.email != nil { Button("Sign out") { model.signOut() }.disabled(model.busy || model.connecting) }
                     }
                     DisclosureGroup("Codex runtime") {
                         Text(model.runtimePath).font(.caption).textSelection(.enabled)

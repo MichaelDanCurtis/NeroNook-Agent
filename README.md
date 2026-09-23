@@ -23,6 +23,10 @@ Threads are ephemeral and read-only. Generated JSON is validated as data; it can
 - `python3 Tools/nook.py pack . --identity <identity>`: independent signed local package using the vendored SDK.
 - `python3 scripts/check-process.py /absolute/app/path`: actual signed-process handshake, two panels, disabled unsigned-in prompt, message identity/sequence and EOF shutdown. It does not start Codex or load a login.
 
-Nero Agent 0.1.0 was installed in the host. The updated 0.1.1 package is built but final installation is awaiting the owner's Mac unlock. Managed browser sign-in was opened and did not complete. Actual account/model access, streamed answer, real cancellation, expired-login behavior and an approved model-generated module action remain acceptance gates. Do not infer them from the fixture checks. Public distribution, licensing and notarization remain separate work.
+Nero Agent **0.1.2** is installed and Running. Managed browser sign-in completed; a real reply, partial streaming and Stop were verified. The installed update restores its own existing login through the runtime at startup, without a browser or credential extraction. Invalid/missing login requires explicit sign-in in Settings; a failed connection stops the child. Sign-out is disabled during connection setup. Protocol-test mode skips restoration.
+
+Actual workflow acceptance: Ask ChatGPT returned a reply through the SDK; the host bound it into Creator Demo's message, showed the exact values for review and applied them only after confirmation. Decline stopped an earlier attempt. After the 0.1.2 update this worked without manual reconnect. A direct model-generated proposal was reviewed in the Nook and its count 9 / “Agent proposal verified” values were read back from the demo. No physical device was controlled. The two unit tests and signed-process handshake/EOF check pass for this build.
+
+Real boolean decision branching, expired-login recovery, live selected-context expiry and broader adversarial model testing remain acceptance gates. Existing accountless configuration/canary/forged-request checks are separate evidence. Public distribution, licensing and notarization remain separate work.
 
 Official protocol reference: https://learn.chatgpt.com/docs/app-server

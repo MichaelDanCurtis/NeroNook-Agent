@@ -37,6 +37,11 @@ import NookPluginSDK
         client.event = { [weak self] method, params in self?.receive(method, params) }
         client.failed = { [weak self] text in self?.connected = false; self?.email = nil; self?.connecting = false; self?.finish(.failed, text) }
         objectWillChange.sink { [weak self] _ in Task { @MainActor in self?.changed?() } }.store(in: &observations)
+        // Restore only this plugin's existing login; never open a browser at startup.
+        // Credential contents remain opaque and are read only by the owned runtime.
+        if !CommandLine.arguments.contains("--protocol-test"), FileManager.default.fileExists(atPath: root.appendingPathComponent("auth.json").path) {
+            Task { [weak self] in self?.connect(allowSignIn: false) }
+        }
     }
     func chooseRuntime() {
         guard !busy, !connecting else { return }
@@ -50,7 +55,7 @@ import NookPluginSDK
             self.status = "Runtime selected. Reconnect your account."
         }
     }
-    func connect() {
+    func connect(allowSignIn: Bool = true) {
         guard !connecting, !busy else { return }
         connecting = true; status = "Connecting to Codex…"
         let loginToken = UUID(); loginGeneration = loginToken
@@ -62,12 +67,17 @@ import NookPluginSDK
                 if let account = result["account"] as? [String: Any], account["type"] as? String == "chatgpt" {
                     email = account["email"] as? String ?? "ChatGPT account"; status = "Ready"; connecting = false
                 } else {
+                    guard allowSignIn else {
+                        client.stop(); connected = false; email = nil; connecting = false
+                        status = "Sign in again in Settings to reconnect your account."
+                        return
+                    }
                     let login = try await client.request("account/login/start", ["type": "chatgpt"])
                     guard loginGeneration == loginToken else { return }
                     guard let id = login["loginId"] as? String, let value = login["authUrl"] as? String, let url = URL(string: value), url.scheme == "https", ["auth.openai.com", "chatgpt.com"].contains(url.host), url.user == nil, url.password == nil else { throw AgentError.message("Codex returned an unexpected sign-in destination.") }
                     loginID = id; status = "Finish signing in in your browser"; NSWorkspace.shared.open(url)
                 }
-            } catch { if loginGeneration == loginToken { status = error.localizedDescription; connecting = false } }
+            } catch { if loginGeneration == loginToken { client.stop(); connected = false; email = nil; threadID = nil; status = error.localizedDescription; connecting = false } }
         }
     }
     func cancelLogin() {
@@ -76,7 +86,7 @@ import NookPluginSDK
         else { client.stop(); connected = false }
     }
     func signOut() {
-        guard !busy else { return }
+        guard !busy, !connecting else { return }
         Task { _ = try? await client.request("account/logout"); client.stop(); connected = false; email = nil; threadID = nil; proposal = nil; status = "Signed out of Nero Agent" }
     }
     func ask(_ text: String, context: String = "None", decision: Bool = false, request: UUID = UUID()) {
