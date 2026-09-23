@@ -1,0 +1,12 @@
+{
+  "id": "cafe.nero.plugin.agent",
+  "name": "Nero Agent",
+  "version": "0.1.1",
+  "apiVersion": 1,
+  "summary": "A ChatGPT account assistant with explicit module context, streamed replies and reviewed proposals.",
+  "capabilities": [
+    "Uses a dedicated installed Codex runtime and its own ChatGPT sign-in",
+    "Sends your message and only the module context you select",
+    "Proposes permitted module actions for your review"
+  ]
+}
