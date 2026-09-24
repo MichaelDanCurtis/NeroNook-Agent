@@ -5,7 +5,7 @@ app=Path(sys.argv[1]).resolve(); session=str(uuid.uuid4())
 p=subprocess.Popen([str(app/'Contents/MacOS/ModuleApp'),'--neronook-plugin','--protocol-test'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
 sel=selectors.DefaultSelector();sel.register(p.stdout,selectors.EVENT_READ)
 try:
- p.stdin.write((json.dumps(dict(type='hello',apiVersion=1,pluginID='cafe.nero.plugin.agent',session=session,sequence=0,features=['panels-v1','forms-v1','actions-v1']))+'\n').encode());p.stdin.flush()
+ p.stdin.write((json.dumps(dict(type='hello',apiVersion=1,pluginID='cafe.nero.plugin.agent',session=session,sequence=0,features=['panels-v1','forms-v1','actions-v1','custom-views-v1']))+'\n').encode());p.stdin.flush()
  buffer=b''; last=-1; kinds=set(); deadline=time.monotonic()+10
  while time.monotonic()<deadline and not {'ready','snapshot','bus'}<=kinds:
   if p.poll() is not None: raise RuntimeError('Packaged module exited during startup')
@@ -18,10 +18,10 @@ try:
     line,buffer=buffer.split(b'\n',1);m=json.loads(line)
     assert uuid.UUID(m['session'])==uuid.UUID(session) and m['sequence']>last and m['pluginID']=='cafe.nero.plugin.agent'
     last=m['sequence'];kinds.add(m['type'])
-    if m['type']=='snapshot': assert len(m['snapshot']['panels'])==2 and m['snapshot']['panels'][0]['forms'][0]['enabled']==False
+    if m['type']=='snapshot': assert len(m['snapshot']['panels'])==1 and m['snapshot']['panels'][0]['customView']['state']['connected']==False and len(m['snapshot']['panels'][0]['customView']['events'])>=8
  assert {'ready','snapshot','bus'}<=kinds
  p.stdin.close();p.wait(timeout=3);assert p.returncode==0
- print('PASS: signed process handshake, two panels, disabled unsigned-in prompt, ordered identity-bound messages, clean EOF. No runtime or account was connected.')
+ print('PASS: signed process handshake, custom chat panel, disabled unsigned-in prompt, ordered identity-bound messages, clean EOF. No runtime or account was connected.')
 finally:
  sel.close()
  if p.poll() is None:p.kill();p.wait()

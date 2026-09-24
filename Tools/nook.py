@@ -16,7 +16,7 @@ import time
 import uuid
 
 HERE = Path(__file__).resolve().parent
-FEATURES = ['dashboard-v1', 'panels-v1', 'control-cards-v1', 'actions-v1', 'forms-v1']
+FEATURES = ['dashboard-v1', 'panels-v1', 'control-cards-v1', 'actions-v1', 'forms-v1', 'custom-views-v1']
 MAX_LINE = 128 * 1024
 
 class Problem(Exception):
@@ -62,6 +62,14 @@ def package(project, binaries, value, identity='-'):
         (app/'Contents/Resources').mkdir()
         shutil.copy2(binaries/'ModuleApp', app/'Contents/MacOS/ModuleApp')
         shutil.copy2(project/'Resources/NookPlugin.json', app/'Contents/Resources/NookPlugin.json')
+        views = project/'Resources/Views'
+        if views.exists():
+            assets = list(views.rglob('*'))
+            files = [p for p in assets if p.is_file()]
+            if views.is_symlink() or any(p.is_symlink() for p in assets) or len(files) > 512 or sum(p.stat().st_size for p in files) > 32*1024*1024:
+                raise Problem('Custom view assets must be normal files within the 512-file / 32 MiB limit.')
+            if any(p.stat().st_size > 2*1024*1024 for p in files): raise Problem('A custom view asset exceeds 2 MiB.')
+            shutil.copytree(views, app/'Contents/Resources/Views')
         info = dict(CFBundleName=value['name'], CFBundleDisplayName=value['name'], CFBundleIdentifier=value['id'],
                     CFBundleExecutable='ModuleApp', CFBundlePackageType='APPL', CFBundleShortVersionString=value['version'],
                     CFBundleVersion='1', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True)
@@ -98,14 +106,15 @@ def create(destination, plugin_id, name):
         shutil.copytree(HERE/'Templates/Native', staged)
         shutil.copytree(sdk, staged/'Vendor/NookPluginSDK', ignore=shutil.ignore_patterns('.build', '.swiftpm', '.DS_Store'))
         shutil.copytree(HERE, staged/'Tools', ignore=shutil.ignore_patterns('__pycache__', 'Tests', 'export-kit.py'))
-        (staged/'Resources').mkdir()
+        (staged/'Resources').mkdir(exist_ok=True)
         value = dict(id=plugin_id, name=name, version='0.1.0', apiVersion=1,
                      summary='An independent local demo module built with the NeroNook creator kit.',
+                     icon=dict(symbol='square.stack.3d.up.fill', color='A78BFA'),
                      capabilities=['Shows local demo state and changes a demo counter', 'Publishes read-only demo status through the shared SDK'])
         (staged/'Resources/NookPlugin.json').write_text(json.dumps(value, ensure_ascii=False, indent=2)+'\n')
         (staged/'.gitignore').write_text('.build/\nbuild/\n.swiftpm/\n.DS_Store\n__pycache__/\n')
         hashes = {str(p.relative_to(sdk)):hashlib.sha256(p.read_bytes()).hexdigest() for p in sdk.rglob('*') if p.is_file() and '.build' not in p.parts and '.swiftpm' not in p.parts and p.name != '.DS_Store'}
-        (staged/'SDK-SNAPSHOT.json').write_text(json.dumps(dict(hostBaseline='0.15.0', apiVersion=1, files=hashes),indent=2)+'\n')
+        (staged/'SDK-SNAPSHOT.json').write_text(json.dumps(dict(hostBaseline='0.20.1', apiVersion=1, files=hashes),indent=2)+'\n')
         staged.rename(destination)
     print('Created independent project: '+str(destination))
     print('Next: python3 Tools/nook.py test .')

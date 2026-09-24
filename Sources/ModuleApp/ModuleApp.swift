@@ -15,6 +15,8 @@ import NookPluginSDK
     private var subscriptions = Set<PluginActionAddress>()
     private var timer: Timer?
     private var forms = false
+    private var customViews = false
+    private var reads: [UUID: (entry: PluginCatalogEntry, continuation: CheckedContinuation<[String: PluginValue], Error>)] = [:]
     private var submitted: Set<UUID> = []
     private var incoming: [UUID] = []
     private var running: Set<UUID> = []
@@ -26,7 +28,24 @@ import NookPluginSDK
         .init("decide", title: "Evaluate a condition with ChatGPT", input: askAction.input, output: .init([.init("reply", .string), .init("decision", .boolean)]), cancellable: true, timeoutSeconds: 180)
     }
     init() {
-        model.changed = { [weak self] in self?.publish() }
+        model.changed = { [weak self] in self?.objectWillChange.send(); self?.publish() }
+        model.readAction = { [weak self] entry, values in
+            guard let self, self.session != nil, self.model.catalog.contains(entry), entry.action?.effect == .readOnly else { throw AgentError.message("That read action is unavailable.") }
+            let id = UUID()
+            return try await withCheckedThrowingContinuation { continuation in
+                self.reads[id] = (entry, continuation)
+                self.bus(.init(.invoke, requestID: id, address: entry.address, values: values))
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(30))
+                    guard let self, let pending = self.reads.removeValue(forKey: id) else { return }
+                    self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: AgentError.message("The Nook tool did not respond in time."))
+                }
+            }
+        }
+        model.cancelReads = { [weak self] in
+            guard let self else { return }; let pending = self.reads; self.reads = [:]
+            for (id, item) in pending { self.bus(.init(.cancel, requestID: id)); item.continuation.resume(throwing: CancellationError()) }
+        }
         model.complete = { [weak self] request, update in guard let self, self.running.remove(request) != nil else { return }; self.bus(.init(.update, requestID: request, update: update)) }
         if hosted {
             NSApplication.shared.setActivationPolicy(.accessory)
@@ -49,8 +68,9 @@ import NookPluginSDK
         guard message.pluginID == id else { exit(1) }
         if session == nil {
             guard message.type == "hello" else { exit(1) }; session = message.session
+            customViews = message.features?.contains("custom-views-v1") == true
             forms = message.features?.contains("forms-v1") == true
-            emit("ready", features: ["dashboard-v1", "panels-v1", "actions-v1", "forms-v1"])
+            emit("ready", features: ["dashboard-v1", "panels-v1", "actions-v1", "forms-v1"] + (customViews ? ["custom-views-v1"] : []))
             if message.features?.contains("actions-v1") == true { bus(.init(.register, registration: .init(actions: [Self.askAction, Self.decisionAction]))); bus(.init(.discover)) }
             publish(); return
         }
@@ -58,19 +78,18 @@ import NookPluginSDK
         if message.type == "action", let action = message.action {
             if action == "configure" { configure() }
             if action == "stop", model.busy { model.cancel() }
-            if action == "review_proposal", let answer = model.proposal {
-                do {
-                    guard let (entry, values) = try answer.proposal(catalog: model.catalog) else { return }
-                    let request = UUID(); submitted.insert(request); model.proposal = nil
-                    bus(.init(.invoke, requestID: request, address: entry.address, values: values)); model.status = "Waiting for action review"
-                } catch { model.status = error.localizedDescription; model.proposal = nil }
-            }
+            if action == "review_proposal" { reviewProposal() }
+            if action == "open_chat" { openChat() }
         }
+        if message.type == "viewEvent", let event = message.viewEvent { do { try handle(event) } catch { model.status = error.localizedDescription }; return }
         guard let message = message.bus else { return }
         switch message.operation {
         case .catalog:
             if (try? catalog.receive(message)) == true {
                 model.catalog = catalog.entries.filter { $0.address.plugin != id }
+                for key in Array(reads.keys) where !model.catalog.contains(reads[key]!.entry) {
+                    reads.removeValue(forKey: key)?.continuation.resume(throwing: AgentError.message("Tool access changed. The result was discarded."))
+                }
                 let permitted = Set(model.catalog.filter { $0.channel?.kind == .state }.map(\.address).sorted { $0.key < $1.key }.prefix(16))
                 for address in subscriptions.subtracting(permitted) { model.states[address.key] = nil; bus(.init(.unsubscribe, address: address)) }
                 for address in permitted.subtracting(subscriptions) { bus(.init(.subscribe, address: address)) }
@@ -92,12 +111,74 @@ import NookPluginSDK
             model.ask(prompt, context: context, decision: message.address?.name == "decide", request: message.requestID)
         case .cancel: model.cancel(request: message.requestID)
         case .update:
+            if let pending = reads[message.requestID], let update = message.update, update.phase.terminal {
+                reads[message.requestID] = nil
+                if update.phase == .succeeded, model.catalog.contains(pending.entry), (try? pending.entry.action?.output.validate(update.values)) != nil { pending.continuation.resume(returning: update.values) }
+                else { pending.continuation.resume(throwing: AgentError.message(update.message.isEmpty ? "The Nook tool could not complete." : update.message)) }
+            }
             if submitted.contains(message.requestID), let update = message.update {
-                model.status = update.message.isEmpty ? update.phase.rawValue.capitalized : update.message
+                model.actionProgress(message.requestID, update)
                 if update.phase.terminal { submitted.remove(message.requestID) }
             }
         case .failure:
-            if submitted.remove(message.requestID) != nil { model.status = message.error ?? "Action request failed" }
+            reads.removeValue(forKey: message.requestID)?.continuation.resume(throwing: AgentError.message(message.error ?? "The tool request failed."))
+            if submitted.remove(message.requestID) != nil { model.actionProgress(message.requestID, .init(.failed, message: message.error ?? "Action request failed")) }
+        default: break
+        }
+    }
+    func openChat() {
+        NSApp.activate(ignoringOtherApps: true); NSApp.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
+    }
+    func reviewProposal() {
+        do {
+            guard session != nil else { throw AgentError.message("Open this module through NeroNook to review an action.") }
+            let (entry, values) = try model.proposalForReview()
+            let request = UUID(); submitted.insert(request); model.proposal = nil
+            bus(.init(.invoke, requestID: request, address: entry.address, values: values)); model.actionProgress(request, .init(.waitingReview, message: "Waiting for action review"))
+        } catch { model.status = error.localizedDescription; model.proposal = nil }
+    }
+    var chatView: PluginCustomView {
+        var shown: [ChatMessage] = []; var budget = 0
+        for var message in model.messages.reversed() {
+            message.text = String(message.text.prefix(9000))
+            let size = (try? JSONEncoder().encode(message).count) ?? 0
+            guard budget + size <= 18000 else { break }; budget += size; shown.append(message)
+        }
+        func json<T: Encodable>(_ value: T) -> String { String(data: (try? JSONEncoder().encode(value)) ?? Data(), encoding: .utf8) ?? "[]" }
+        let history = model.conversations.reversed().map { ["id": $0.id.uuidString, "title": $0.title] }
+        var view = PluginCustomView(entry: "chat/index.html", revision: "chat1", state: [
+            "messages": .string(json(Array(shown.reversed()))), "history": .string(json(history)), "conversation": .string(model.currentID.uuidString),
+            "busy": .boolean(model.busy), "connected": .boolean(model.email != nil), "status": .string(model.status),
+            "title": .string(model.conversation.title), "retention": .number(Double(model.retentionDays)),
+            "historyError": .string(model.historyError ?? ""), "omitted": .boolean(shown.count < model.messages.count),
+            "proposal": .string(model.proposal.map { String((($0.action ?? "") + "\n" + $0.arguments).prefix(2000)) } ?? ""),
+            "contextCount": .number(Double(model.catalog.count))
+        ], events: [
+            .init("send", input: .init([.init("text", .string), .init("context", .boolean)])), .init("stop"), .init("new"), .init("retry"),
+            .init("select", input: .init([.init("id", .string)])), .init("settings"), .init("review"), .init("open"), .init("copy", input: .init([.init("id", .string)]))
+        ])
+        while (try? view.validate()) == nil, !shown.isEmpty {
+            shown.removeLast()
+            view.state["messages"] = .string(json(Array(shown.reversed())))
+            view.state["omitted"] = .boolean(true)
+        }
+        return view
+    }
+    func handle(_ event: PluginViewEvent) throws {
+        guard event.panelID == "conversation" else { throw AgentError.message("Unknown view.") }; try chatView.validate(event)
+        switch event.name {
+        case "send": if case .string(let text) = event.values["text"], case .boolean(let context) = event.values["context"], !model.busy { model.sendChat(text, useContext: context) }
+        case "stop": model.cancel()
+        case "new": model.newConversation()
+        case "retry": model.retry()
+        case "select": if case .string(let id) = event.values["id"], let uuid = UUID(uuidString: id) { model.selectConversation(uuid) }
+        case "copy":
+            if case .string(let id) = event.values["id"], let message = model.messages.first(where: { $0.id.uuidString == id }), !message.text.isEmpty {
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string); model.status = "Copied message"
+            }
+        case "settings": configure()
+        case "review": reviewProposal()
+        case "open": openChat()
         default: break
         }
     }
@@ -116,15 +197,17 @@ import NookPluginSDK
             for start in stride(from: 0, to: min(text.count, 7200), by: 1200) { sections.append(.init(start == 0 ? "Nero" : "Continued", String(text[start..<min(start + 1200, text.count)]))) }
         }
         if let proposal = model.proposal { sections.append(.init("Proposed action · not executed", String(((proposal.action ?? "") + "\n" + proposal.arguments).prefix(1200)))) }
-        if sections.isEmpty { sections = [.init("Your account, your choice", "Use the gear button to connect your existing ChatGPT account. Each message sends only your text and the module state you explicitly select. Voice is coming later.")] }
+        if sections.isEmpty { sections = [.init("Your account, your choice", "Use the gear button to connect your existing ChatGPT account. Each message sends only your text and the module state you explicitly select. Open chat to start a conversation.")] }
         let contextSections = model.states.keys.sorted().prefix(12).map { key in PluginSection(String(key.prefix(80)), String(model.states[key]!.values.keys.sorted().map { "\($0): \(model.states[key]!.values[$0]!.display)" }.joined(separator: "\n").prefix(1200))) }
-        let snapshot = PluginSnapshot(title: "Nero Agent", status: model.status, activity: String(model.status.prefix(100)), actions: [
+        let snapshot = PluginSnapshot(title: "Nero Agent", status: model.status, activity: String(model.status.prefix(100)), actions: customViews ? [] : [
+            .init("open_chat", "Open chat", symbol: "arrow.up.left.and.arrow.down.right"),
             .init("stop", "Stop", enabled: model.busy, symbol: "stop.fill"),
             .init("review_proposal", "Review proposed action", enabled: model.proposal != nil && !model.busy, symbol: "checkmark.shield")
         ], badge: model.email == nil ? "Not connected" : "ChatGPT", panels: [
-            .init("conversation", "Conversation", sections: sections, forms: forms ? [form] : nil),
+            customViews ? .init("conversation", "Conversation", customView: chatView) : .init("conversation", "Conversation", sections: sections, forms: forms ? [form] : nil),
+        ] + (customViews ? [] : [
             .init("context", "Context preview", sections: contextSections.isEmpty ? [.init("No module context", "Allow Nero Agent to receive selected module updates in Nook Settings → Modules → Actions and connections. Receiving an update here does not send it to ChatGPT. Choose an attachment when asking.")] : contextSections)
-        ])
+        ]))
         guard (try? snapshot.validate()) != nil else { return }; emit("snapshot", snapshot: snapshot)
     }
     private func bus(_ value: PluginBusMessage) { emit("bus", bus: value) }
@@ -135,40 +218,8 @@ import NookPluginSDK
     }
 }
 
-struct AgentView: View {
-    @ObservedObject var model: AgentModel
-    @State private var draft = ""
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack { Label("Nero Agent", systemImage: "sparkles").font(.title2.bold()); Spacer(); Text(model.email == nil ? "Not connected" : "ChatGPT").font(.caption); Button { model.settingsVisible = true } label: { Image(systemName: "gearshape") } }
-            ScrollView { VStack(alignment: .leading, spacing: 16) { if !model.prompt.isEmpty { Text(model.prompt).foregroundStyle(.secondary) }; Text(model.reply.isEmpty ? (model.busy ? "Thinking…" : model.email == nil ? "Connect your ChatGPT account in Settings to begin." : "Ready when you are. Ask a question below.") : model.reply).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) } }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            HStack { TextField("Message to ChatGPT", text: $draft).textFieldStyle(.roundedBorder).onSubmit(send); Button("Send", action: send).disabled(model.email == nil || model.busy || draft.isEmpty); Button("Stop") { model.cancel() }.disabled(!model.busy) }
-            Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-        }.padding(20).frame(width: 720, height: 405).preferredColorScheme(.dark).tint(.mint)
-            .sheet(isPresented: $model.settingsVisible) {
-                VStack(alignment: .leading, spacing: 18) {
-                    HStack { Text("Nero Agent Settings").font(.title2.bold()); Spacer(); Button("Done") { model.settingsVisible = false } }
-                    Text(model.email ?? "Use your existing ChatGPT / Codex account.")
-                    Text("A separate sign-in keeps Nero Agent’s conversations and tools separate from the Codex desktop. No API key is required.").font(.callout).foregroundStyle(.secondary)
-                    Text(model.status).font(.callout)
-                    HStack {
-                        Button(model.email == nil ? "Sign in with ChatGPT" : "Reconnect") { model.connect() }.disabled(model.connecting || model.busy)
-                        if model.connecting { Button("Cancel sign-in") { model.cancelLogin() } }
-                        if model.email != nil { Button("Sign out") { model.signOut() }.disabled(model.busy || model.connecting) }
-                    }
-                    DisclosureGroup("Codex runtime") {
-                        Text(model.runtimePath).font(.caption).textSelection(.enabled)
-                        Button("Choose runtime…") { model.chooseRuntime() }.disabled(model.busy || model.connecting)
-                    }
-                    Text("Uses the installed Codex runtime. The preview disables shell and browser tools and restricts the runtime to its own data and macOS support files. Module actions require a separate review in NeroNook.").font(.caption).foregroundStyle(.secondary)
-                }.padding(24).frame(width: 520)
-            }
-    }
-    private func send() { guard !draft.isEmpty else { return }; let text = draft; draft = ""; model.ask(text) }
-}
-
 @main struct NeroAgentApp: App {
     @StateObject private var plugin: AgentPlugin
     init() { let plugin = AgentPlugin(); _plugin = StateObject(wrappedValue: plugin) }
-    var body: some Scene { WindowGroup { AgentView(model: plugin.model).onAppear { if plugin.hosted { NSApp.windows.first { $0.canBecomeKey }?.orderOut(nil) } } }.windowResizability(.contentSize) }
+    var body: some Scene { WindowGroup { AgentView(plugin: plugin, model: plugin.model).onAppear { if plugin.hosted { NSApp.windows.first { $0.canBecomeKey }?.orderOut(nil) } } }.defaultSize(width: 850, height: 540) }
 }

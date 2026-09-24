@@ -71,6 +71,8 @@ public enum AgentRuntime {
 
 /// Bounded stdio client. Owns only its dedicated runtime; never desktop auth/config.
 @MainActor public final class CodexClient {
+    public var tool: (([String: Any]) async throws -> [String: Any])?
+    private var toolRequests = Set<String>()
     public var event: ((String, [String: Any]) -> Void)?
     public var failed: ((String) -> Void)?
     public var diagnostic: ((String) -> Void)?
@@ -115,7 +117,7 @@ public enum AgentRuntime {
             guard let self, self.generation == token else { return }; self.stop(); self.failed?("The isolated Codex runtime stopped. Check its installed version and reconnect.")
         } }
         try child.run()
-        let initialization = try await request("initialize", ["clientInfo": ["name": "neronook_agent", "title": "Nero Agent", "version": "0.1.0"], "capabilities": ["experimentalApi": false]])
+        let initialization = try await request("initialize", ["clientInfo": ["name": "neronook_agent", "title": "Nero Agent", "version": "0.2.0"], "capabilities": ["experimentalApi": true]])
         guard (initialization["userAgent"] as? String)?.hasPrefix("neronook_agent/0.142.5 ") == true else {
             stop(); throw AgentError.message("This preview was verified with Codex 0.142.5. Its isolation must be checked before using a different runtime version.")
         }
@@ -142,7 +144,7 @@ public enum AgentRuntime {
         }
     }
     public func stop() {
-        generation = UUID(); let child = process; process = nil
+        generation = UUID(); toolRequests.removeAll(); let child = process; process = nil
         try? input?.fileHandleForWriting.close(); input = nil
         for continuation in pending.values { continuation.resume(throwing: AgentError.message("Codex connection closed.")) }; pending = [:]
         if child?.isRunning == true { child?.terminate() }
@@ -160,8 +162,23 @@ public enum AgentRuntime {
             guard line.count <= 1_048_576, let object = try JSONSerialization.jsonObject(with: line) as? [String: Any] else { throw AgentError.message("Invalid response") }
             if let method = object["method"] as? String {
                 if let id = object["id"] {
-                    // No runtime request can grant tools, credentials, permissions, or side effects.
-                    try send(["id": id, "error": ["code": -32601, "message": "This client does not permit runtime tool or permission requests."]])
+                    // Only the registered dynamic bridge may respond. All other runtime
+                    // requests (including permissions/credentials/execution) remain denied.
+                    if method == "item/tool/call", let tool, let params = object["params"] as? [String: Any],
+                       let keyData = try? JSONSerialization.data(withJSONObject: [id]),
+                       let key = String(data: keyData, encoding: .utf8), toolRequests.count < 256,
+                       toolRequests.insert(key).inserted {
+                        let token = generation
+                        Task { [weak self] in
+                            let result: [String: Any]
+                            do { result = try await tool(params) }
+                            catch { result = AgentTools.response(error.localizedDescription, success: false) }
+                            guard let self, self.generation == token else { return }
+                            try? self.send(["id": id, "result": result])
+                        }
+                    } else {
+                        try send(["id": id, "error": ["code": -32601, "message": "This client does not permit this runtime request."]])
+                    }
                 } else { event?(method, object["params"] as? [String: Any] ?? [:]) }
             } else if let id = object["id"] as? Int, let continuation = pending.removeValue(forKey: id) {
                 if let error = object["error"] as? [String: Any] { continuation.resume(throwing: AgentError.message(String((error["message"] as? String ?? "Codex request failed").prefix(400)))) }

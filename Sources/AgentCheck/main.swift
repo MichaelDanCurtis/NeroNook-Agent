@@ -4,18 +4,28 @@ import ModuleCore
 @main struct Check {
     @MainActor static func main() async throws {
         if CommandLine.arguments.contains("app-server") {
-            var accountRequest: Any?, denied = 0
+            var accountRequest: Any?, toolRequest: Any?, denied = 0, tools = 0
             func emit(_ value: [String: Any]) { var data = try! JSONSerialization.data(withJSONObject: value); data.append(10); FileHandle.standardOutput.write(data) }
             while let line = readLine(), let data = line.data(using: .utf8), let message = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let method = message["method"] as? String, let id = message["id"] {
                     if method == "initialize" { emit(["id": id, "result": ["userAgent": "neronook_agent/0.142.5 (fixture)"]]) }
                     if method == "config/read" { emit(["id": id, "result": ["config": ["web_search": "disabled", "features": Dictionary(uniqueKeysWithValues: ["shell_tool", "unified_exec", "apps", "plugins", "hooks", "computer_use", "browser_use", "multi_agent", "code_mode"].map { ($0, false) })]]]) }
+                    if method == "test/tools" {
+                        toolRequest = id
+                        for (index, tool, thread) in [(0, "nook_capabilities", "thread"), (1, "nook_capabilities", "stale"), (2, "shell", "thread")] {
+                            emit(["id": 950 + index, "method": "item/tool/call", "params": ["tool": tool, "threadId": thread, "turnId": "turn", "callId": "call-\(index)", "arguments": [String: String]()]])
+                        }
+                    }
                     if method == "account/read" {
                         accountRequest = id
                         for (index, method) in ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "account/chatgptAuthTokens/refresh", "item/tool/call", "item/permissions/requestApproval"].enumerated() {
                             emit(["id": 900 + index, "method": method, "params": ["command": "unapproved", "path": "outside"]])
                         }
                     }
+                } else if let id = message["id"] as? Int, (950..<953).contains(id) {
+                    guard let result = message["result"] as? [String: Any], result["success"] as? Bool == (id == 950) else { exit(9) }
+                    tools += 1
+                    if tools == 3, let toolRequest { emit(["id": toolRequest, "result": ["checked": tools]]) }
                 } else if let id = message["id"] as? Int, (900..<905).contains(id) {
                     guard (message["error"] as? [String: Any])?["code"] as? Int == -32601 else { exit(8) }
                     denied += 1
@@ -53,12 +63,21 @@ import ModuleCore
               let features = effective["features"] as? [String: Any], features["shell_tool"] as? Bool == false, features["apps"] as? Bool == false else { throw AgentError.message("Isolated configuration check failed") }
         let account = try await client.request("account/read", ["refreshToken": false])
         guard account["account"] is NSNull else { throw AgentError.message("Probe unexpectedly inherited an account") }
+        let thread = try await client.request("thread/start", ["cwd": root.appendingPathComponent("workspace").path, "ephemeral": true, "sandbox": "read-only", "approvalPolicy": "never", "dynamicTools": AgentTools.definitions])
+        guard thread["thread"] is [String: Any] else { throw AgentError.message("Runtime rejected registered tools") }
         client.stop()
         let fixture = CodexClient(directory: root.appendingPathComponent("fixture"))
         try await fixture.start(binary: binary)
         let rejected = try await fixture.request("account/read", ["refreshToken": false])
         guard rejected["denied"] as? Int == 5 else { throw AgentError.message("A server request was not denied") }
+        fixture.tool = { params in
+            _ = try AgentTools.validate(params, thread: "thread", turn: "turn", enabled: true)
+            return AgentTools.response("Registered Nook tool fixture")
+        }
+        let tools = try await fixture.request("test/tools")
+        guard tools["checked"] as? Int == 3 else { throw AgentError.message("Registered tool routing failed") }
         fixture.stop()
+        print("PASS: real runtime accepts dynamic tool definitions; fixture routes registered tool and rejects stale/unknown calls.")
         print("PASS: five forged tool, permission and credential requests denied. No execution or credential callback exposed.")
         print("PASS: outside-file read/write and arbitrary execution denied; isolated runtime initialized; shell and connectors disabled; no desktop account inherited.")
     }
