@@ -18,10 +18,10 @@ try:
     line,buffer=buffer.split(b'\n',1);m=json.loads(line)
     assert uuid.UUID(m['session'])==uuid.UUID(session) and m['sequence']>last and m['pluginID']=='cafe.nero.plugin.agent'
     last=m['sequence'];kinds.add(m['type'])
-    if m['type']=='snapshot': assert len(m['snapshot']['panels'])==1 and m['snapshot']['panels'][0]['customView']['state']['connected']==False and len(m['snapshot']['panels'][0]['customView']['events'])>=8
+    if m['type']=='snapshot': assert len(m['snapshot']['panels'])==2 and m['snapshot']['panels'][0]['customView']['state']['connected']==False and len(m['snapshot']['panels'][0]['customView']['events'])>=8
  assert {'ready','snapshot','bus'}<=kinds
  p.stdin.close();p.wait(timeout=3);assert p.returncode==0
- print('PASS: signed process handshake, custom chat panel, disabled unsigned-in prompt, ordered identity-bound messages, clean EOF. No runtime or account was connected.')
+ print('PASS: signed process handshake, custom chat/activity panels, disabled unsigned-in prompt, ordered identity-bound messages, clean EOF. No runtime or account was connected.')
 finally:
  sel.close()
  if p.poll() is None:p.kill();p.wait()

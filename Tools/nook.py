@@ -14,6 +14,8 @@ import sys
 import tempfile
 import time
 import uuid
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from signing import resolve as resolve_signing, sign, verify_update, SigningError
 
 HERE = Path(__file__).resolve().parent
 FEATURES = ['dashboard-v1', 'panels-v1', 'control-cards-v1', 'actions-v1', 'forms-v1', 'custom-views-v1']
@@ -52,7 +54,11 @@ def validate(project, binaries):
     print('PASS: manifest accepted by the vendored SDK.')
     return value
 
-def package(project, binaries, value, identity='-'):
+def package(project, binaries, value, identity=None, test_only=False):
+    if not test_only:
+        identity, reference = resolve_signing(value['id'], identity)
+    else:
+        reference = None
     output = project/'build'
     output.mkdir(exist_ok=True)
     # Construct only in a new staging directory; never replace an in-use app.
@@ -74,7 +80,13 @@ def package(project, binaries, value, identity='-'):
                     CFBundleExecutable='ModuleApp', CFBundlePackageType='APPL', CFBundleShortVersionString=value['version'],
                     CFBundleVersion='1', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True)
         (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
-        run(['codesign', '--force', '--sign', identity, app], capture=True)
+        if test_only:
+            info['CFBundleIdentifier'] = value['id'] + '.protocol-test'
+            (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+            run(['codesign', '--force', '--sign', '-', app], capture=True)
+        else:
+            sign(app, identity)
+            verify_update(app, reference)
         run(['codesign', '--verify', '--deep', '--strict', app], capture=True)
         digest = hashlib.sha256()
         for path in sorted(app.rglob('*')):
@@ -178,7 +190,7 @@ def main():
     for command in ['validate','test','pack','dev']:
         p=sub.add_parser(command);p.add_argument('project',type=Path,nargs='?',default=Path('.'))
         if command in ['dev','test']:p.add_argument('--replay',type=Path,help='Starter-only bounded local demo-state replay')
-        if command in ['pack','dev']:p.add_argument('--identity',default='-',help='Explicit code-signing identity; default is local ad hoc')
+        if command in ['pack','dev']:p.add_argument('--identity',help='Stable certificate; defaults to the installed app identity or NERONOOK_SIGNING_IDENTITY')
     args=parser.parse_args()
     if args.command=='create':create(args.destination.absolute(),args.id,args.name);return
     project=args.project.resolve()
@@ -186,7 +198,7 @@ def main():
     binaries=build(project,release=args.command=='pack')
     value=validate(project,binaries)
     if args.command=='validate':return
-    app=package(project,binaries,value,getattr(args,'identity','-'))
+    app=package(project,binaries,value,getattr(args,'identity',None),test_only=args.command=='test')
     if args.command=='test':
         run(['swift','test'],project)
         replay=args.replay.resolve() if args.replay else None
@@ -205,5 +217,5 @@ def main():
 
 if __name__=='__main__':
     try:main()
-    except (Problem,OSError,ValueError,KeyError) as error:
+    except (Problem,SigningError,OSError,ValueError,KeyError) as error:
         print('Error: '+str(error),file=sys.stderr);sys.exit(1)

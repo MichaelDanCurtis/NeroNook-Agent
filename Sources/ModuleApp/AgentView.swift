@@ -4,10 +4,20 @@ import NookPluginSDK
 struct AgentView: View {
     @ObservedObject var plugin: AgentPlugin
     @ObservedObject var model: AgentModel
+    @ObservedObject var continual: ContinualModel
+    @State private var selectedPanel = "conversation"
     var body: some View {
-        PluginWebSurface(root: Bundle.main.resourceURL!.appendingPathComponent("Views"), panelID: "conversation", definition: plugin.chatView) { event in
-            try plugin.handle(event)
+        VStack(spacing: 0) {
+            HStack {
+                Picker("Agent view", selection: $selectedPanel) { Text("Conversation").tag("conversation"); Text("Activity").tag("awareness") }.pickerStyle(.segmented).frame(width: 240)
+                Spacer(); Text(model.busy ? "Working" : continual.phase).font(.caption).foregroundStyle(.mint)
+                Button("Nero can see…") { continual.sourcesVisible = true }
+            }.padding(12)
+            PluginWebSurface(root: Bundle.main.resourceURL!.appendingPathComponent("Views"), panelID: selectedPanel, definition: selectedPanel == "conversation" ? plugin.chatView : plugin.awarenessView) { event in
+                try plugin.handle(event)
+            }.id(selectedPanel)
         }.frame(minWidth: 640, minHeight: 400).preferredColorScheme(.dark).tint(.mint)
+        .sheet(isPresented: $continual.sourcesVisible) { ContextSourcesView(model: continual) }
         .sheet(isPresented: $model.settingsVisible) {
             VStack(alignment: .leading, spacing: 18) {
                 HStack { Text("Nero Agent Settings").font(.title2.bold()); Spacer(); Button("Done") { model.settingsVisible = false } }

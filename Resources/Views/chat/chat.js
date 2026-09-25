@@ -8,10 +8,10 @@ function markdown(parent,text){let code=false,buf=[],list=null;for(const line of
 function send(){const text=$('draft').value.trim();if(!text||state.busy||!state.connected)return;if(new TextEncoder().encode(text).length>2048){$('error').textContent='Please keep this message under 2,048 bytes.';$('error').hidden=false;return;}pendingDraft=text;emit('send',{text,context:$('useContext').checked});}
 $('send').onclick=send;$('stop').onclick=()=>emit('stop');$('new').onclick=()=>emit('new');$('settings').onclick=()=>emit('settings');$('open').onclick=()=>emit('open');$('review').onclick=()=>emit('review');$('retry').onclick=()=>emit('retry');$('historyButton').onclick=()=>{$('history').hidden=!$('history').hidden;};$('closeHistory').onclick=()=>{$('history').hidden=true;};
 $('draft').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send();}});$('draft').addEventListener('input',()=>{$('send').disabled=!state.connected||state.busy||!$('draft').value.trim();});
-function contextHint(){$('contextHint').textContent=$('useContext').checked?`${state.contextCount||0} permitted tools · reads may be sent to ChatGPT`:'Only your message and conversation';}
+function contextHint(){$('contextHint').textContent=$('useContext').checked?`${state.contextCount||0} tools · only permitted, shareable context`:'Only your message and conversation';}
 $('useContext').onchange=contextHint;
 for(const button of document.querySelectorAll('[data-prompt]'))button.onclick=()=>{$('draft').value=button.dataset.prompt;$('useContext').checked=button.dataset.context==='true';contextHint();$('draft').focus();$('send').disabled=!state.connected||state.busy;};
-nero.onState(next=>{state=next;$('error').hidden=!state.historyError;$('error').textContent=state.historyError||'';
+nero.onState(next=>{state=next;$('presence').textContent=state.busy?'Working':(state.presence||'Ready');$('error').hidden=!state.historyError;$('error').textContent=state.historyError||'';
  if(conversation!==state.conversation){conversation=state.conversation;$('draft').value='';$('history').hidden=true;lastMessages='';pendingDraft=null;}
  let messages=[];try{messages=JSON.parse(state.messages||'[]');}catch{}
  if(pendingDraft&&messages.some(m=>m.role==='user'&&m.text===pendingDraft)&&state.busy){if($('draft').value.trim()===pendingDraft)$('draft').value='';pendingDraft=null;}

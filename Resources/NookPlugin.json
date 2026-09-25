@@ -1,13 +1,15 @@
 {
   "id": "cafe.nero.plugin.agent",
   "name": "Nero Agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "apiVersion": 1,
-  "summary": "Chat with local conversation history, visible tool activity and reviewed Nook actions.",
+  "summary": "Chat, selected context and persistent automation watches with visible activity.",
   "capabilities": [
     "Uses a dedicated installed Codex runtime and its own ChatGPT sign-in",
     "Sends your messages, conversation context and permitted Nook data when you enable Nook context",
-    "Proposes permitted module actions for your review"
+    "Proposes permitted module actions for your review",
+    "Observes only selected windows, workspace inventories and permitted automation runs",
+    "Keeps watches and activity on this Mac; selected context starts local-only"
   ],
   "icon": {
     "symbol": "bubble.left.and.bubble.right.fill",

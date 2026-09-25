@@ -6,6 +6,7 @@ import NookPluginSDK
 
 @MainActor final class AgentPlugin: ObservableObject {
     let model = AgentModel()
+    let continual = ContinualModel()
     let id = "cafe.nero.plugin.agent"
     let hosted = CommandLine.arguments.contains("--neronook-plugin")
     private var session: UUID?
@@ -16,7 +17,7 @@ import NookPluginSDK
     private var timer: Timer?
     private var forms = false
     private var customViews = false
-    private var reads: [UUID: (entry: PluginCatalogEntry, continuation: CheckedContinuation<[String: PluginValue], Error>)] = [:]
+    private var reads: [UUID: (entry: PluginCatalogEntry, chat: Bool, continuation: CheckedContinuation<[String: PluginValue], Error>)] = [:]
     private var submitted: Set<UUID> = []
     private var incoming: [UUID] = []
     private var running: Set<UUID> = []
@@ -29,21 +30,19 @@ import NookPluginSDK
     }
     init() {
         model.changed = { [weak self] in self?.objectWillChange.send(); self?.publish() }
+        continual.changed = { [weak self] in self?.objectWillChange.send(); self?.publish() }
+        continual.catalog = { [weak self] in self?.model.catalog ?? [] }
+        continual.read = { [weak self] entry, values in
+            guard let self else { throw CancellationError() }; return try await self.invokeRead(entry, values: values, chat: false)
+        }
+        continual.invalidatePlanner = { [weak self] in self?.model.invalidateLocalContext() }
+        model.catalogForPlanner = { [weak self] in self?.continual.plannerCatalog ?? [] }
+        model.localContext = { [weak self] in guard let self else { throw CancellationError() }; return try self.continual.cloudContext() }
         model.readAction = { [weak self] entry, values in
-            guard let self, self.session != nil, self.model.catalog.contains(entry), entry.action?.effect == .readOnly else { throw AgentError.message("That read action is unavailable.") }
-            let id = UUID()
-            return try await withCheckedThrowingContinuation { continuation in
-                self.reads[id] = (entry, continuation)
-                self.bus(.init(.invoke, requestID: id, address: entry.address, values: values))
-                Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(30))
-                    guard let self, let pending = self.reads.removeValue(forKey: id) else { return }
-                    self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: AgentError.message("The Nook tool did not respond in time."))
-                }
-            }
+            guard let self else { throw CancellationError() }; return try await self.invokeRead(entry, values: values, chat: true)
         }
         model.cancelReads = { [weak self] in
-            guard let self else { return }; let pending = self.reads; self.reads = [:]
+            guard let self else { return }; let pending = self.reads.filter { $0.value.chat }; for id in pending.keys { self.reads[id] = nil }
             for (id, item) in pending { self.bus(.init(.cancel, requestID: id)); item.continuation.resume(throwing: CancellationError()) }
         }
         model.complete = { [weak self] request, update in guard let self, self.running.remove(request) != nil else { return }; self.bus(.init(.update, requestID: request, update: update)) }
@@ -53,16 +52,34 @@ import NookPluginSDK
             FileHandle.standardInput.readabilityHandler = { [weak self] file in
                 let data = file.availableData
                 Task { @MainActor in
-                    guard let self else { return }; guard !data.isEmpty else { self.model.shutdown(); exit(0) }
-                    do { for m in try self.input.append(data) { self.receive(m) } } catch { self.model.shutdown(); exit(1) }
+                    guard let self else { return }; guard !data.isEmpty else { self.continual.shutdown(); self.model.shutdown(); exit(0) }
+                    do { for m in try self.input.append(data) { self.receive(m) } } catch { self.continual.shutdown(); self.model.shutdown(); exit(1) }
                 }
             }
         }
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in Task { @MainActor in self?.publish() } }; self.timer = timer; RunLoop.main.add(timer, forMode: .common)
     }
+    private func invokeRead(_ entry: PluginCatalogEntry, values: [String: PluginValue], chat: Bool) async throws -> [String: PluginValue] {
+        guard session != nil, model.catalog.contains(entry), entry.action?.effect == .readOnly, reads.count < 16 else { throw AgentError.message("That read action is unavailable.") }
+        let id = UUID()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                reads[id] = (entry, chat, continuation)
+                bus(.init(.invoke, requestID: id, address: entry.address, values: values))
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(30))
+                    guard let self, let pending = self.reads.removeValue(forKey: id) else { return }
+                    self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: AgentError.message("The Nook tool did not respond in time."))
+                }
+            }
+        } onCancel: { Task { @MainActor [weak self] in
+            guard let self, let pending = self.reads.removeValue(forKey: id) else { return }
+            self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: CancellationError())
+        } }
+    }
     func configure() {
-        model.settingsVisible = true; NSApp.activate(ignoringOtherApps: true)
-        NSApp.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
+        model.settingsVisible = true; openChat()
     }
     private func receive(_ message: PluginMessage) {
         guard message.pluginID == id else { exit(1) }
@@ -93,7 +110,7 @@ import NookPluginSDK
                 let permitted = Set(model.catalog.filter { $0.channel?.kind == .state }.map(\.address).sorted { $0.key < $1.key }.prefix(16))
                 for address in subscriptions.subtracting(permitted) { model.states[address.key] = nil; bus(.init(.unsubscribe, address: address)) }
                 for address in permitted.subtracting(subscriptions) { bus(.init(.subscribe, address: address)) }
-                subscriptions = permitted; publish()
+                subscriptions = permitted; continual.catalogChanged(); publish()
             }
         case .event:
             if let address = message.address, subscriptions.contains(address), let lifetime = message.lifetime, lifetime.isFinite, lifetime > 0 {
@@ -127,7 +144,17 @@ import NookPluginSDK
         }
     }
     func openChat() {
-        NSApp.activate(ignoringOtherApps: true); NSApp.windows.first { $0.canBecomeKey }?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.canBecomeKey }) {
+            if let screen = window.screen ?? NSScreen.main {
+                let visible = screen.visibleFrame.insetBy(dx: 12, dy: 12)
+                var frame = window.frame; frame.size.width = min(frame.width, visible.width); frame.size.height = min(frame.height, visible.height)
+                frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
+                frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
+                window.setFrame(frame, display: true)
+            }
+            window.makeKeyAndOrderFront(nil)
+        }
     }
     func reviewProposal() {
         do {
@@ -152,7 +179,7 @@ import NookPluginSDK
             "title": .string(model.conversation.title), "retention": .number(Double(model.retentionDays)),
             "historyError": .string(model.historyError ?? ""), "omitted": .boolean(shown.count < model.messages.count),
             "proposal": .string(model.proposal.map { String((($0.action ?? "") + "\n" + $0.arguments).prefix(2000)) } ?? ""),
-            "contextCount": .number(Double(model.catalog.count))
+            "contextCount": .number(Double(model.catalog.count)), "presence": .string(continual.phase), "watchCount": .number(Double(continual.archive.watches.filter { !$0.dismissed && !$0.terminalSeen }.count))
         ], events: [
             .init("send", input: .init([.init("text", .string), .init("context", .boolean)])), .init("stop"), .init("new"), .init("retry"),
             .init("select", input: .init([.init("id", .string)])), .init("settings"), .init("review"), .init("open"), .init("copy", input: .init([.init("id", .string)]))
@@ -165,6 +192,7 @@ import NookPluginSDK
         return view
     }
     func handle(_ event: PluginViewEvent) throws {
+        if event.panelID == "awareness" { try handleAwareness(event); return }
         guard event.panelID == "conversation" else { throw AgentError.message("Unknown view.") }; try chatView.validate(event)
         switch event.name {
         case "send": if case .string(let text) = event.values["text"], case .boolean(let context) = event.values["context"], !model.busy { model.sendChat(text, useContext: context) }
@@ -199,27 +227,30 @@ import NookPluginSDK
         if let proposal = model.proposal { sections.append(.init("Proposed action · not executed", String(((proposal.action ?? "") + "\n" + proposal.arguments).prefix(1200)))) }
         if sections.isEmpty { sections = [.init("Your account, your choice", "Use the gear button to connect your existing ChatGPT account. Each message sends only your text and the module state you explicitly select. Open chat to start a conversation.")] }
         let contextSections = model.states.keys.sorted().prefix(12).map { key in PluginSection(String(key.prefix(80)), String(model.states[key]!.values.keys.sorted().map { "\($0): \(model.states[key]!.values[$0]!.display)" }.joined(separator: "\n").prefix(1200))) }
-        let snapshot = PluginSnapshot(title: "Nero Agent", status: model.status, activity: String(model.status.prefix(100)), actions: customViews ? [] : [
+        let snapshot = PluginSnapshot(title: "Nero Agent", status: model.busy ? model.status : continual.phase + " · " + model.status, activity: String((model.busy ? model.status : continual.phase + " · " + continual.status).prefix(100)), actions: customViews ? [] : [
             .init("open_chat", "Open chat", symbol: "arrow.up.left.and.arrow.down.right"),
             .init("stop", "Stop", enabled: model.busy, symbol: "stop.fill"),
             .init("review_proposal", "Review proposed action", enabled: model.proposal != nil && !model.busy, symbol: "checkmark.shield")
         ], badge: model.email == nil ? "Not connected" : "ChatGPT", panels: [
             customViews ? .init("conversation", "Conversation", customView: chatView) : .init("conversation", "Conversation", sections: sections, forms: forms ? [form] : nil),
+            customViews ? .init("awareness", "Activity", customView: awarenessView) : .init("awareness", "Activity", sections: [.init("Continual Agent", continual.phase + " · Open Agent to manage sources and watches.")]),
         ] + (customViews ? [] : [
             .init("context", "Context preview", sections: contextSections.isEmpty ? [.init("No module context", "Allow Nero Agent to receive selected module updates in Nook Settings → Modules → Actions and connections. Receiving an update here does not send it to ChatGPT. Choose an attachment when asking.")] : contextSections)
         ]))
-        guard (try? snapshot.validate()) != nil else { return }; emit("snapshot", snapshot: snapshot)
+        guard (try? snapshot.validate()) != nil else {
+            emit("snapshot", snapshot: .init(title: "Nero Agent", status: "View unavailable · open Agent", actions: [.init("open_chat", "Open Agent"), .init("stop", "Stop reply", enabled: model.busy)])); return
+        }; emit("snapshot", snapshot: snapshot)
     }
     private func bus(_ value: PluginBusMessage) { emit("bus", bus: value) }
     private func emit(_ type: String, features: [String]? = nil, snapshot: PluginSnapshot? = nil, bus: PluginBusMessage? = nil) {
         guard let session else { return }; if type != "ready" { sequence += 1 }
         do { try FileHandle.standardOutput.write(contentsOf: PluginMessage(type: type, pluginID: id, session: session, sequence: sequence, snapshot: snapshot, features: features, bus: bus).encoded()) }
-        catch { model.shutdown(); exit(0) }
+        catch { continual.shutdown(); model.shutdown(); exit(0) }
     }
 }
 
 @main struct NeroAgentApp: App {
     @StateObject private var plugin: AgentPlugin
     init() { let plugin = AgentPlugin(); _plugin = StateObject(wrappedValue: plugin) }
-    var body: some Scene { WindowGroup { AgentView(plugin: plugin, model: plugin.model).onAppear { if plugin.hosted { NSApp.windows.first { $0.canBecomeKey }?.orderOut(nil) } } }.defaultSize(width: 850, height: 540) }
+    var body: some Scene { WindowGroup { AgentView(plugin: plugin, model: plugin.model, continual: plugin.continual).onAppear { if plugin.hosted { NSApp.windows.first { $0.canBecomeKey }?.orderOut(nil) } } }.defaultSize(width: 850, height: 540) }
 }
