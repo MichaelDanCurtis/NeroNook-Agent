@@ -1,7 +1,7 @@
 {
   "id": "cafe.nero.plugin.agent",
   "name": "Nero Agent",
-  "version": "0.5.19",
+  "version": "0.5.20",
   "apiVersion": 1,
   "summary": "Voice and text assistant with web, reviewed Mac tools and independent MCP connections.",
   "capabilities": [
