@@ -74,6 +74,7 @@ import NookPluginSDK
     private var actionMessages: [UUID: (conversation: UUID, message: UUID)] = [:]
     private var proposalEntry: PluginCatalogEntry?
     var voiceReply: ((UUID,String,Bool,Bool,Bool)->Void)?
+    var voiceDelivery: ((UUID,PluginExpressionCue?)->Void)?
     private var voiceTargets: [UUID:(UUID,UUID)] = [:]
     var changed: (() -> Void)?
     var complete: ((UUID, PluginRunUpdate) -> Void)?
@@ -257,6 +258,7 @@ import NookPluginSDK
                 parameters["config"] = ["web_search": turnWeb ? "live" : "disabled"]
                 if interactive && evidence == nil {
                     parameters["baseInstructions"] = AgentConversationInstructions.make(nook: toolsEnabled, web: turnWeb, integrations: Set(turnIntegrationKeys.keys))
+                    parameters["baseInstructions"] = (parameters["baseInstructions"] as? String ?? "") + "\n\n" + AgentAnswer.deliveryInstructions
                     if voiceQuick { parameters["baseInstructions"] = (parameters["baseInstructions"] as? String ?? "") + "\n\n" + SpokenReplyPolicy.instructions }
                 }
                 let result = try await client.request("thread/start", parameters)
@@ -366,7 +368,7 @@ import NookPluginSDK
         }
         if method == "item/agentMessage/delta", let delta = params["delta"] as? String {
             guard raw.utf8.count + delta.utf8.count <= 65536 else { cancel(); status = "Response exceeded the preview limit"; return }
-            raw += delta; let preview=AgentAnswer.streamingReply(raw);reply=preview.text; if !reply.isEmpty,!firstReplyTimed {firstReplyTimed=true;SpeechTiming.mark("firstReply",milliseconds:1000*(ProcessInfo.processInfo.systemUptime-requestStartedAt))}; changeReply(reply); status = "Replying…"; if let active,interactive{voiceReply?(active,reply,false,true,preview.sealed)}
+            raw += delta; let preview=AgentAnswer.streamingReply(raw);reply=preview.text; if !reply.isEmpty,!firstReplyTimed {firstReplyTimed=true;SpeechTiming.mark("firstReply",milliseconds:1000*(ProcessInfo.processInfo.systemUptime-requestStartedAt))}; changeReply(reply); status = "Replying…"; if let active,interactive{voiceDelivery?(active,AgentAnswer.streamingDelivery(raw));voiceReply?(active,reply,false,true,preview.sealed)}
         }
         if method == "item/completed", let item = params["item"] as? [String: Any], item["type"] as? String == "agentMessage", let text = item["text"] as? String, text.utf8.count <= 65536 { raw = text; reply = AgentAnswer.partialReply(raw); changeReply(reply) }
         if method == "turn/completed", let turn = params["turn"] as? [String: Any], turn["id"] as? String == turnID {
@@ -382,6 +384,7 @@ import NookPluginSDK
                     let proposed = try answer.proposal(catalog: turnCatalog)
                     if let proposed, !catalog.contains(proposed.0) { throw AgentError.message("The proposed action changed. Ask again.") }
                     if deciding, answer.decision == nil { throw AgentError.message("A boolean decision was not returned.") }
+                    if let active, interactive { voiceDelivery?(active,PluginExpressionCue.named(answer.delivery)) }
                     decisionValue = answer.decision; reply = answer.reply
                     proposal = interactive && !deciding && proposed != nil ? answer : nil; proposalEntry = proposal == nil ? nil : proposed?.0
                     finish(.succeeded, proposal == nil ? "Ready" : "Proposal ready · nothing has run")

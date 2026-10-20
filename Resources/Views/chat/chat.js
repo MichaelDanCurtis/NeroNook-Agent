@@ -38,6 +38,7 @@ nero.onState(next=>{state=next;
  let voiceControls=null;try{voiceControls=JSON.parse(talk.controls||'null');}catch{}
  $('talkMicrophoneName').textContent=talk.active&&voiceControls?.microphone?voiceControls.microphone:'Microphone';
  $('talkSettings').title=talk.active?'Change microphone · stops Talk':'Choose microphone and speech recognition';
+ $('talkExpression').checked=!!talk.expressionEnabled;$('talkExpression').disabled=!talk.ready;
  $('talkVoiceEngine').textContent=voiceControls?.recognition||'Shared local speech for Nero and Ember';
  const sensitivity=$('talkSensitivity');sensitivity.disabled=!talk.ready||!voiceControls;
  if(document.activeElement!==sensitivity)sensitivity.value=String(voiceControls?.sensitivity??50);
@@ -47,7 +48,7 @@ nero.onState(next=>{state=next;
 
  $('duplex').value=talk.mode||'half';$('duplex').disabled=!!talk.active&&!talk.ready;$('talkState').textContent=talk.active?(talk.phase==='permission'?(talk.status||'Waiting for voice permission…'):(talk.phase||'starting')):(talk.status||'Press Talk to start');
  $('talkWords').textContent=talk.partial||(talk.active?talk.status:'');$('talkWords').hidden=!$('talkWords').textContent;
- document.querySelectorAll('.nook-presence').forEach(el=>window.NookAvatar?.speech(el,talk.outputLevel||0,talk.active&&talk.phase==='speaking'));
+ document.querySelectorAll('.nook-presence').forEach(el=>{window.NookAvatar?.speech(el,talk.outputLevel||0,talk.active&&talk.phase==='speaking');let pose={};try{pose=JSON.parse(talk.expression||'{}')}catch{}window.NookAvatar?.expression(el,pose);});
  $('talkMeter').hidden=!talk.active;
  $('talkMeter').value=talk.active ? (talk.phase==='speaking' ? (talk.outputLevel||0):(talk.level||0)):0;
  $('talkMeter').setAttribute('aria-label',talk.phase==='speaking'?'Speech playback level':'Microphone level');
@@ -113,3 +114,5 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape')$('talkVoiceControls
 
 // Explicit click handling also supports nonactivating Nook panels.
 $('talkVoiceControls').querySelector('summary').onclick=e=>{e.preventDefault();$('talkVoiceControls').open=!$('talkVoiceControls').open;};
+
+$('talkExpression').onchange=()=>emit('talk',{command:'expression',value:String($('talkExpression').checked)});
