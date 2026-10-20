@@ -48,7 +48,7 @@ nero.onState(next=>{state=next;
 
  $('duplex').value=talk.mode||'half';$('duplex').disabled=!!talk.active&&!talk.ready;$('talkState').textContent=talk.active?(talk.phase==='permission'?(talk.status||'Waiting for voice permission…'):(talk.phase||'starting')):(talk.status||'Press Talk to start');
  $('talkWords').textContent=talk.partial||(talk.active?talk.status:'');$('talkWords').hidden=!$('talkWords').textContent;
- window.NookAvatar?.setBusy?.(!!talk.active||!!state.speechActive);document.querySelectorAll('.nook-presence').forEach(el=>{window.NookAvatar?.speech(el,talk.outputLevel||0,talk.active&&talk.phase==='speaking');let pose={};try{pose=JSON.parse(talk.expression||'{}')}catch{}window.NookAvatar?.expression(el,pose);});
+ window.NookAvatar?.setBusy?.(!!talk.active||(!!state.speechActive&&!state.reactionSpeaking));document.querySelectorAll('.nook-presence').forEach(el=>{window.NookAvatar?.speech(el,talk.outputLevel||0,talk.active&&talk.phase==='speaking');let pose={};try{pose=JSON.parse(talk.expression||'{}')}catch{}window.NookAvatar?.expression(el,pose);});
  $('talkMeter').hidden=!talk.active;
  $('talkMeter').value=talk.active ? (talk.phase==='speaking' ? (talk.outputLevel||0):(talk.level||0)):0;
  $('talkMeter').setAttribute('aria-label',talk.phase==='speaking'?'Speech playback level':'Microphone level');

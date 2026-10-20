@@ -279,6 +279,8 @@ import NookPluginSDK
             .init("send", input: .init([.init("text", .string), .init("context", .boolean)])), .init("stop"), .init("new"), .init("retry"),
             .init("select", input: .init([.init("id", .string)])), .init("settings", input: .init([.init("command", .string, required:false), .init("id", .string, required:false)])), .init("review"), .init("open", input: .init([.init("page", .string, required:false)])), .init("copy", input: .init([.init("id", .string)]))
         ])
+        view.avatarReactions=true;view.avatarPlayback=speech.avatarPlayback
+        view.state["reactionSpeaking"] = .boolean(speech.avatarPlayback != nil)
         while (try? view.validate()) == nil, messageBudget > 512 {
             messageBudget = max(512, messageBudget / 2)
             shown = AgentPresentation.messages(model.messages, budget: messageBudget)
@@ -290,6 +292,12 @@ import NookPluginSDK
     func handle(_ event: PluginViewEvent) throws {
         if event.panelID == "awareness" { try handleAwareness(event); return }
         guard event.panelID == "conversation" else { throw AgentError.message("Unknown view.") }; try chatView.validate(event)
+        if event.name == PluginAvatarPlayback.event {
+            guard case .string(let raw)=event.values["id"],let id=UUID(uuidString:raw),case .string(let kind)=event.values["kind"] else {throw ModuleProblem("Invalid avatar reaction.")}
+            if kind == "stop" {speech.stopReaction(id)}
+            else if let reaction=PluginAvatarReaction(rawValue:kind), !(talk.active || model.busy) {try speech.react(reaction,id:id)}
+            publish();return
+        }
         switch event.name {
         case "tools": tools.visible = true; openChat()
         case "tool_review": if case .string(let id) = event.values["id"], let id = UUID(uuidString: id), case .boolean(let allow) = event.values["allow"] {
