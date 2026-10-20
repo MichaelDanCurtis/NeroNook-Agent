@@ -63,17 +63,15 @@ extension AgentPlugin {
 struct ContextSourcesView: View {
     @ObservedObject var model: ContinualModel
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { VStack(alignment: .leading) { Text("Nero can see").font(.title2.bold()); Text("Choose the context. You stay in control.").foregroundStyle(.secondary) }; Spacer(); Button("Done") { model.sourcesVisible = false } }
+        PluginSettingsPage("Nero can see", subtitle: "Choose the context. You stay in control.", symbol: "viewfinder", width: 700, height: 650, done: { model.sourcesVisible = false }) {
             HStack { Button("Add workspace…") { model.addWorkspace() }; Button("Choose window…") { model.chooseWindow() }; Button("Add Nook activity") { model.addNook() } }
-            Text("New sources stay on this Mac. “Available to ChatGPT” permits the selected preview to be read only when you enable context for a chat message. Nothing here grants control of an app.").font(.callout).foregroundStyle(.secondary)
-            ScrollView {
+            Text("New sources stay on this Mac. “Available to ChatGPT” permits the selected preview to be read only when you enable context for a chat message. Nothing here grants control of an app.").font(.callout).pluginSecondaryText()
                 VStack(alignment: .leading, spacing: 14) {
                     let goals = model.archive.watches.filter { !$0.dismissed && !$0.terminalSeen }
                     if !goals.isEmpty {
                         VStack(alignment: .leading, spacing: 5) {
                             Text("Active goals").font(.headline)
-                            Text("Follow the final outcome of these exact automation runs. Goals share the Nook activity source's observation and ChatGPT controls.").font(.caption).foregroundStyle(.secondary)
+                            Text("Follow the final outcome of these exact automation runs. Goals share the Nook activity source's observation and ChatGPT controls.").font(.caption).pluginSecondaryText()
                             ForEach(goals) { goal in Text("\(goal.title) · \(goal.paused ? "Paused" : "Watching")").font(.callout) }
                         }.padding(12)
                     }
@@ -87,22 +85,21 @@ struct ContextSourcesView: View {
                             }
                             if let notice = model.notices[source.id] { Text(notice).font(.caption).foregroundStyle(.orange) }
                             if let fact = model.context.snapshot(sources: [source], cloud: false, now: Date()).first {
-                                Text("Updated \(fact.observed.formatted(date: .omitted, time: .standard)) · expires after 30 seconds").font(.caption).foregroundStyle(.secondary)
+                                Text("Updated \(fact.observed.formatted(date: .omitted, time: .standard)) · expires after 30 seconds").font(.caption).pluginSecondaryText()
                                 DisclosureGroup("Preview observed context") { Text(fact.text).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6) }
-                            } else { Text(source.enabled ? "No fresh context" : "Excluded").font(.caption).foregroundStyle(.secondary) }
-                        }.padding(14).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
+                            } else { Text(source.enabled ? "No fresh context" : "Excluded").font(.caption).pluginSecondaryText() }
+                        }.padding(14).background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12))
                     }
                 }
-            }
+        } footer: {
             HStack { Button(model.archive.paused ? "Resume awareness" : "Pause awareness") { model.setPaused(!model.archive.paused) }; Button("Clear current context") { model.clearContext() }; Spacer(); Button("Refresh") { model.refresh() } }
-            Text(model.storageError ?? model.status).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }.padding(22).frame(width: 650, height: 550).preferredColorScheme(.dark)
+            Text(model.storageError ?? model.status).font(.caption).pluginSecondaryText().fixedSize(horizontal: false, vertical: true)
+        }
         .sheet(isPresented: $model.windowPickerVisible) {
-            VStack(alignment: .leading, spacing: 15) {
-                HStack { Text("Choose one window").font(.title2.bold()); Spacer(); Button("Cancel") { model.windowPickerVisible = false } }
-                Text("Nero reads the selected window’s Accessibility text. Password fields are skipped. No screenshots are stored. Window selection must be renewed after restarting Agent.").font(.callout).foregroundStyle(.secondary)
-                ScrollView { VStack(alignment: .leading) { ForEach(model.windowChoices) { window in Button { model.selectWindow(window) } label: { VStack(alignment: .leading) { Text(window.app).font(.headline); Text(window.title).font(.caption) }.frame(maxWidth: .infinity, alignment: .leading).padding(9) }.buttonStyle(.bordered) } } }
-            }.padding(22).frame(width: 570, height: 430)
+            PluginSettingsPage("Choose one window", subtitle: "Select exactly which window Nero may observe.", symbol: "macwindow", width: 620, height: 520, done: { model.windowPickerVisible = false }) {
+                Text("Nero reads the selected window’s Accessibility text. Password fields are skipped. No screenshots are stored. Window selection must be renewed after restarting Agent.").font(.callout).pluginSecondaryText()
+                VStack(alignment: .leading) { ForEach(model.windowChoices) { window in Button { model.selectWindow(window) } label: { VStack(alignment: .leading) { Text(window.app).font(.headline); Text(window.title).font(.caption) }.frame(maxWidth: .infinity, alignment: .leading).padding(9) }.buttonStyle(.bordered) } }
+            }
         }
     }
 }

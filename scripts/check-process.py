@@ -18,9 +18,17 @@ try:
     line,buffer=buffer.split(b'\n',1);m=json.loads(line)
     assert uuid.UUID(m['session'])==uuid.UUID(session) and m['sequence']>last and m['pluginID']=='cafe.nero.plugin.agent'
     last=m['sequence'];kinds.add(m['type'])
+    if m['type']=='bus' and m['bus']['operation']=='register':
+     actions={a['id']:a for a in m['bus']['registration']['actions']}
+     assert {'ask','decide','answer_evidence','answer_evidence_chat'}==set(actions)
+     assert actions['answer_evidence_chat']['effect']=='readOnly' and actions['answer_evidence_chat']['cancellable']
+     assert 'history' in [f['name'] for f in actions['answer_evidence_chat']['input']['fields']]
     if m['type']=='snapshot': assert len(m['snapshot']['panels'])==2 and m['snapshot']['panels'][0]['customView']['state']['connected']==False and len(m['snapshot']['panels'][0]['customView']['events'])>=8
  assert {'ready','snapshot','bus'}<=kinds
- p.stdin.close();p.wait(timeout=3);assert p.returncode==0
+ p.stdin.close();p.stdin=None
+ # Drain final cancellation/invalidation snapshots while waiting for EOF shutdown.
+ # A pipe left unread can block the module's final bounded writes.
+ p.communicate(timeout=3);assert p.returncode==0
  print('PASS: signed process handshake, custom chat/activity panels, disabled unsigned-in prompt, ordered identity-bound messages, clean EOF. No runtime or account was connected.')
 finally:
  sel.close()

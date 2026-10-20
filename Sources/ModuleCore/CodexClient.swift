@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import NookPluginSDK
 
 public enum AgentError: LocalizedError {
@@ -7,7 +8,10 @@ public enum AgentError: LocalizedError {
 }
 
 public enum AgentRuntime {
-    public static let testedVersion = "codex-cli 0.142.5"
+    public static let testedVersion = "codex-cli 0.162.0"
+    public static func accepts(userAgent: String) -> Bool {
+        ["0.142.5", "0.162.0"].contains { userAgent.hasPrefix("neronook_agent/\($0) ") }
+    }
     public static var defaultBinary: URL { FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex") }
     public static let configuration = """
     approval_policy = "never"
@@ -44,9 +48,26 @@ public enum AgentRuntime {
     [apps._default]
     enabled = false
     """
+    /// The native runtime's signed Code Mode helper carries built-in web tools.
+    /// It gets the same outer containment; no user executable is admitted by name alone.
+    public static func verifiedCodeHost(binary: URL) -> URL? {
+        guard binary.lastPathComponent == "codex" else { return nil }
+        let helper = binary.deletingLastPathComponent().appendingPathComponent("codex-code-mode-host").resolvingSymlinksInPath()
+        func valid(_ url: URL, identifier: String) -> Bool {
+            var code: SecStaticCode?, requirement: SecRequirement?
+            let rule = "anchor apple generic and certificate leaf[subject.OU] = \"2DC432GLL2\" and identifier \"\(identifier)\""
+            guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,
+                  SecRequirementCreateWithString(rule as CFString, [], &requirement) == errSecSuccess, let requirement else { return false }
+            return SecStaticCodeCheckValidity(code, [], requirement) == errSecSuccess
+        }
+        return valid(binary, identifier: "codex") && valid(helper, identifier: "codex-code-mode-host") ? helper : nil
+    }
     public static func sandbox(binary: URL, directory: URL) -> String {
         func quote(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\"" }
         let path = directory.resolvingSymlinksInPath().path
+        let helper = verifiedCodeHost(binary: binary)
+        let helperExec = helper.map { "(allow process-exec (literal \(quote($0.path))))" } ?? ""
+        let helperRead = helper.map { "(allow file-read-data (literal \(quote($0.path))))" } ?? ""
         return """
         (version 1)
         (allow default)
@@ -54,6 +75,8 @@ public enum AgentRuntime {
         (deny file-write*)
         (deny process-exec)
         (allow process-fork)
+        \(helperExec)
+        \(helperRead)
         (allow process-exec (literal \(quote(binary.resolvingSymlinksInPath().path))))
         (allow signal (target self))
         (allow sysctl-read)
@@ -118,8 +141,8 @@ public enum AgentRuntime {
         } }
         try child.run()
         let initialization = try await request("initialize", ["clientInfo": ["name": "neronook_agent", "title": "Nero Agent", "version": "0.2.0"], "capabilities": ["experimentalApi": true]])
-        guard (initialization["userAgent"] as? String)?.hasPrefix("neronook_agent/0.142.5 ") == true else {
-            stop(); throw AgentError.message("This preview was verified with Codex 0.142.5. Its isolation must be checked before using a different runtime version.")
+        guard AgentRuntime.accepts(userAgent: initialization["userAgent"] as? String ?? "") else {
+            stop(); throw AgentError.message("This preview accepts verified Codex 0.142.5 or 0.162.0. Its isolation must be checked before using a different runtime version.")
         }
         try send(["method": "initialized", "params": [:]])
         let result = try await request("config/read", ["includeLayers": false])
@@ -152,7 +175,7 @@ public enum AgentRuntime {
     }
     private func send(_ message: [String: Any]) throws {
         var data = try JSONSerialization.data(withJSONObject: message)
-        guard data.count <= 131072 else { throw AgentError.message("This request is too large.") }
+        guard data.count <= (message["result"] != nil ? 4_000_000 : 131072) else { throw AgentError.message("This request is too large.") }
         guard let input else { throw AgentError.message("Codex connection closed.") }; data.append(10); try input.fileHandleForWriting.write(contentsOf: data)
     }
     private func receive(_ data: Data) throws {
@@ -174,6 +197,7 @@ public enum AgentRuntime {
                             do { result = try await tool(params) }
                             catch { result = AgentTools.response(error.localizedDescription, success: false) }
                             guard let self, self.generation == token else { return }
+                            self.toolRequests.remove(key)
                             try? self.send(["id": id, "result": result])
                         }
                     } else {

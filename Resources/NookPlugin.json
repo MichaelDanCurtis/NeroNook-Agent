@@ -1,18 +1,26 @@
 {
   "id": "cafe.nero.plugin.agent",
   "name": "Nero Agent",
-  "version": "0.3.0",
+  "version": "0.5.16",
   "apiVersion": 1,
-  "summary": "Chat, selected context and persistent automation watches with visible activity.",
+  "summary": "Voice and text assistant with web, reviewed Mac tools and independent MCP connections.",
   "capabilities": [
     "Uses a dedicated installed Codex runtime and its own ChatGPT sign-in",
     "Sends your messages, conversation context and permitted Nook data when you enable Nook context",
     "Proposes permitted module actions for your review",
-    "Observes only selected windows, workspace inventories and permitted automation runs",
-    "Keeps watches and activity on this Mac; selected context starts local-only"
+    "On-demand Mac window reads; screenshots and control operations require review and macOS permissions",
+    "Keeps watches and activity on this Mac; selected context starts local-only",
+    "Explicit voice conversations through a permitted local speech plugin; recognized words use this Agent account, audio stays local; no direct microphone access",
+    "Cited-answer actions use supplied transcript text and recent chat context; no tools, action proposals or inherited personal chat.",
+    "Live web search and explicitly connected local/remote MCP tools; separate sign-in; tool results can be sent to the agent account"
   ],
   "icon": {
     "symbol": "bubble.left.and.bubble.right.fill",
     "color": "8DE4C6"
+  },
+  "assistant": {
+    "name": "Nero",
+    "summary": "Independent conversational assistant",
+    "avatar": "nero"
   }
 }

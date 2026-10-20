@@ -1,3 +1,21 @@
+## October 13 follow-up · installed 0.3.2
+
+Twenty-three tests pass. The installed Codex 0.162.0 runtime passes the same
+restricted configuration, file/exec canaries, registered-tool routing and five
+forged execution/permission/credential-request checks. Unknown runtime versions
+remain rejected. Fresh documented managed sign-in is complete; real native chat
+with context off returns the synthetic phrase. Read aloud finishes through Voice
+0.10.2 / Apple Voice 2, and immediate Stop during preparation reports Reading
+stopped. Native output quality and long/repeated playback remain owner acceptance.
+
+The two first process harnesses blocked during EOF because they stopped draining
+final snapshots. Their failed receipts are preserved. Draining while retaining
+the same three-second shutdown bound makes both release-package protocol and
+state-receipt lifecycle checks pass; no app shutdown policy was weakened.
+[Exact delivery record](../NeroNook-Voice/reports/shared-speech-notetaker-2026-10-13/README.md).
+
+Historical evidence below remains unchanged.
+
 # Continual Agent — 0.3.0
 
 September 24–25, 2026. Independent native plugin; the host runtime remains 0.26.1. Final signed package: `cafe.nero.plugin.agent-0.3.0-800807f5a4e7.app`.

@@ -67,7 +67,11 @@ def package(project, binaries, value, identity=None, test_only=False):
         (app/'Contents/MacOS').mkdir(parents=True)
         (app/'Contents/Resources').mkdir()
         shutil.copy2(binaries/'ModuleApp', app/'Contents/MacOS/ModuleApp')
+        sdk_assets = binaries/'NookPluginSDK_NookPluginSDK.bundle'
+        if sdk_assets.exists(): shutil.copytree(sdk_assets, app/'Contents/Resources'/sdk_assets.name)
         shutil.copy2(project/'Resources/NookPlugin.json', app/'Contents/Resources/NookPlugin.json')
+        notices = project/'Resources/ThirdPartyNotices.txt'
+        if notices.exists(): shutil.copy2(notices, app/'Contents/Resources/ThirdPartyNotices.txt')
         views = project/'Resources/Views'
         if views.exists():
             assets = list(views.rglob('*'))
@@ -78,7 +82,7 @@ def package(project, binaries, value, identity=None, test_only=False):
             shutil.copytree(views, app/'Contents/Resources/Views')
         info = dict(CFBundleName=value['name'], CFBundleDisplayName=value['name'], CFBundleIdentifier=value['id'],
                     CFBundleExecutable='ModuleApp', CFBundlePackageType='APPL', CFBundleShortVersionString=value['version'],
-                    CFBundleVersion='1', LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True)
+                    CFBundleVersion='1', LSUIElement=True, LSMinimumSystemVersion='14.0', NSHighResolutionCapable=True)
         (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
         if test_only:
             info['CFBundleIdentifier'] = value['id'] + '.protocol-test'
