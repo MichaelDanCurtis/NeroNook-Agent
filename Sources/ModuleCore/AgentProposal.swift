@@ -21,18 +21,21 @@ public struct AgentAnswer: Codable, Equatable {
         "properties": ["reply": ["type": "string"], "action": ["type": ["string", "null"]], "arguments": ["type": "string"], "decision": ["type": ["boolean", "null"]]]
     ] }
     public static func partialReply(_ raw: String) -> String {
-        guard raw.utf8.count <= 65536, let range = raw.range(of: #""reply"\s*:\s*""#, options: .regularExpression) else { return "" }
-        var encoded = "", escaped = false
+        streamingReply(raw).text
+    }
+    public static func streamingReply(_ raw: String) -> (text: String, sealed: Bool) {
+        guard raw.utf8.count <= 65536, let range = raw.range(of: #""reply"\s*:\s*""#, options: .regularExpression) else { return ("",false) }
+        var encoded = "", escaped = false, sealed = false
         for char in raw[range.upperBound...] {
-            if char == "\"", !escaped { break }
+            if char == "\"", !escaped { sealed = true; break }
             encoded.append(char)
             if escaped { escaped = false } else if char == "\\" { escaped = true }
         }
         // A delta can end in the middle of an escape or a surrogate pair.
         for _ in 0...12 {
-            if let decoded = try? JSONDecoder().decode(String.self, from: Data(("\"" + encoded + "\"").utf8)) { return decoded }
-            if encoded.isEmpty { return "" }; encoded.removeLast()
+            if let decoded = try? JSONDecoder().decode(String.self, from: Data(("\"" + encoded + "\"").utf8)) { return (decoded,sealed) }
+            if encoded.isEmpty { return ("",false) }; encoded.removeLast();sealed=false
         }
-        return ""
+        return ("",false)
     }
 }

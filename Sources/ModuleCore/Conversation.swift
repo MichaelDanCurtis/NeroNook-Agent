@@ -11,6 +11,8 @@ public struct ChatMessage: Codable, Equatable, Identifiable {
     public var role: String
     public var text: String
     public var phase: String
+    public var voiceHeard: String?
+    public var voiceInterrupted: Bool?
     public var context: Bool
     public var activities: [ChatActivity] = []
     public init(role: String, text: String, phase: String = "complete", context: Bool = false) { self.role = role; self.text = text; self.phase = phase; self.context = context }
@@ -42,8 +44,11 @@ public struct Conversation: Codable, Equatable, Identifiable {
     public func context(before id: UUID? = nil) -> String {
         var lines: [String] = []; var bytes = 0
         let eligible = id.flatMap { target in messages.firstIndex(where: { $0.id == target }) }.map { Array(messages.prefix($0)) } ?? messages
-        for m in eligible.reversed() where !m.text.isEmpty && m.phase == "complete" {
-            let line = "\(m.role): \(m.text)"
+        for m in eligible.reversed() where !m.text.isEmpty && (m.phase == "complete" || (m.phase == "stopped" && m.voiceHeard?.isEmpty == false)) {
+            let text = m.role == "assistant" ? (m.voiceHeard ?? m.text) : m.text
+            guard !text.isEmpty else { continue }
+            let delivery = m.voiceInterrupted == true ? " (voice interrupted; only completed spoken sentences follow)" : ""
+            let line = "\(m.role)\(delivery): \(text)"
             guard bytes + line.utf8.count < 24000 else { break }
             lines.append(line); bytes += line.utf8.count
         }
@@ -65,7 +70,7 @@ public struct ConversationArchive: Codable {
         guard version == 1, conversations.count <= 20, Set(conversations.map(\.id)).count == conversations.count else { throw AgentError.message("Conversation history needs recovery. The original file was kept.") }
         for c in conversations {
             guard c.title.count <= 48, c.messages.count <= 40, Set(c.messages.map(\.id)).count == c.messages.count,
-                  c.messages.allSatisfy({ ["user", "assistant"].contains($0.role) && $0.text.count <= 16000 && ["complete", "working", "stopped", "failed", "interrupted"].contains($0.phase) && $0.activities.count <= 16 && $0.activities.allSatisfy({ $0.title.count <= 300 && $0.id.count <= 100 && $0.phase.count <= 40 }) }) else { throw AgentError.message("Conversation history needs recovery. The original file was kept.") }
+                  c.messages.allSatisfy({ ["user", "assistant"].contains($0.role) && $0.text.count <= 16000 && ($0.voiceHeard?.count ?? 0) <= 16000 && ["complete", "working", "stopped", "failed", "interrupted"].contains($0.phase) && $0.activities.count <= 16 && $0.activities.allSatisfy({ $0.title.count <= 300 && $0.id.count <= 100 && $0.phase.count <= 40 }) }) else { throw AgentError.message("Conversation history needs recovery. The original file was kept.") }
         }
     }
 }
