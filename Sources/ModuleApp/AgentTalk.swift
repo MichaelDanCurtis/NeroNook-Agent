@@ -6,6 +6,13 @@ import NookPluginSDK
 
 @MainActor final class AgentTalk: ObservableObject {
     let client = PluginSpeechConversationClient()
+    let expression = PluginExpressionPlayback()
+    private var replyCue: PluginExpressionCue?
+    private(set) var expressionEnabled = false
+    func chooseExpression(_ enabled: Bool) throws {
+        guard active,client.ready else { throw AgentError.message("Start Talk before enabling expressive delivery.") }
+        expressionEnabled=enabled; if !enabled { expression.clear() }; changed?()
+    }
     @Published var mode = UserDefaults.standard.string(forKey:"talkDuplex") ?? "half"
     @Published var quickReplies = UserDefaults.standard.object(forKey:"talkQuickReplies") as? Bool ?? true
     @Published var phase = "idle"
@@ -23,12 +30,13 @@ import NookPluginSDK
     private var observations:[NSObjectProtocol]=[]
     private var clientObservation:AnyCancellable?
     init(){
+        expression.changed = { [weak self] in self?.changed?() }
         client.event={ [weak self] in self?.receive($0) }
         client.ended={ [weak self] in self?.retired() }
         clientObservation=client.objectWillChange.sink{[weak self] _ in Task{@MainActor in self?.changed?()}}
         for name in [NSWorkspace.willSleepNotification,NSWorkspace.sessionDidResignActiveNotification]{observations.append(NSWorkspace.shared.notificationCenter.addObserver(forName:name,object:nil,queue:.main){[weak self] _ in Task{@MainActor in self?.stop()}})}
     }
-    func bind(_ model:AgentModel){self.model=model;model.voiceReply={ [weak self] id,text,final,success,sealed in self?.reply(id,text:text,final:final,success:success,sealed:sealed) }}
+    func bind(_ model:AgentModel){self.model=model;model.voiceDelivery = { [weak self] id,cue in guard let self, self.request == id else { return }; self.replyCue = cue };model.voiceReply={ [weak self] id,text,final,success,sealed in self?.reply(id,text:text,final:final,success:success,sealed:sealed) }}
     var active:Bool{client.active}
     func chooseReplyPace(_ value:String) throws {
         guard ["quick","default"].contains(value) else{throw AgentError.message("Choose a reply pace")}
@@ -52,10 +60,10 @@ import NookPluginSDK
     func stop(){interrupt();client.stop();phase="idle";partial="";level=0;outputLevel=0;status="Conversation stopped";changed?()}
     private func retired(){
         if let request{model?.markVoice(request,heard:heard,interrupted:true);model?.cancel(request:request)}
-        request=nil;playing=false;queue=ConversationSpeechQueue();phase="idle";partial="";level=0;outputLevel=0;changed?()
+        expression.clear();expressionEnabled=false;replyCue=nil;request=nil;playing=false;queue=ConversationSpeechQueue();phase="idle";partial="";level=0;outputLevel=0;changed?()
     }
     private func interrupt(notifyProvider:Bool=true){
-        outputLevel=0
+        outputLevel=0;expression.clear();replyCue=nil
         let old=request;request=nil
         if let old{model?.markVoice(old,heard:heard,interrupted:true);model?.cancel(request:old)}
         queue=ConversationSpeechQueue();playing=false;chunk=""
@@ -75,15 +83,17 @@ import NookPluginSDK
         case "partial":partial=text("text")
         case "speechStarted":interrupt(notifyProvider:false);phase="listening";status="Listening"
         case "final":
-            guard case .number(let n)=values["turn"],n>Double(turn),let model else{return}
-            turn=Int(n);SpeechTiming.mark("recognized",turn:turn);partial="";heard="";queue=ConversationSpeechQueue();playing=false
+            guard case .number(let n)=values["turn"],n.rounded()==n,n>Double(turn),let model else{return}
+            expression.clear();replyCue=nil;turn=Int(n);SpeechTiming.mark("recognized",turn:turn);partial="";heard="";queue=ConversationSpeechQueue();playing=false
             request=model.sendVoice(text("text"),useContext:useContext,quick:quickReplies)
             if request==nil{stop();status="Agent is reconnecting. Your words are saved below; try again when connected.";recoveryDraft=text("text")}
             else{phase="thinking";status="Thinking"}
-        case "speaking":phase="speaking";status="Speaking"
+        case "expressionStarted": _ = expression.started(text("text"))
+        case "speaking":
+            guard playing,case .number(let n)=values["turn"],n==Double(turn) else{return};phase="speaking";status="Speaking"
         case "played":
             guard case .number(let n)=values["turn"],Int(n)==turn,playing else{return}
-            outputLevel=0
+            outputLevel=0;expression.clear()
             heard += (heard.isEmpty ? "":" ")+chunk;if let request{model?.markVoice(request,heard:heard)};playing=false;chunk="";advance()
         default:break
         };changed?()
@@ -96,7 +106,7 @@ import NookPluginSDK
     private func advance(){
         guard active,client.ready,!playing else{return}
         if let next=queue.next(){
-            do{SpeechTiming.mark("chunkSent",turn:turn);chunk=next;playing=true;try client.input(PluginSpeechConversation.values("speak",text:next,turn:turn));phase="preparing";status="Preparing speech…"}
+            do{SpeechTiming.mark("chunkSent",turn:turn);chunk=next;playing=true;expression.stage(try client.speak(next,cue:expressionEnabled ? replyCue:nil,turn:turn));phase="preparing";status="Preparing speech…"}
             catch{stop();status=error.localizedDescription}
         }else if queue.drained{
             if let request{model?.markVoice(request,heard:heard)};request=nil

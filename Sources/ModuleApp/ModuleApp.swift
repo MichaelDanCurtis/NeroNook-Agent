@@ -258,7 +258,7 @@ import NookPluginSDK
         var messageBudget = 18000
         var shown = AgentPresentation.messages(model.messages, budget: messageBudget)
         let history = model.conversations.reversed().map { ["id": $0.id.uuidString, "title": AgentPresentation.prefix($0.title, bytes: 96)] }
-        let talkState: [String:PluginValue] = ["controls":.string((try? talk.client.controls?.encoded()) ?? ""),"accessAvailable":.boolean(talk.client.accessRequestsAvailable),"active":.boolean(talk.active),"ready":.boolean(talk.client.ready),"mode":.string(talk.mode),"replyPace":.string(talk.quickReplies ? "quick":"default"),"phase":.string(talk.client.awaitingPermission ? "permission" : talk.phase),"partial":.string(AgentPresentation.prefix(talk.recoveryDraft.isEmpty ? talk.partial : talk.recoveryDraft,bytes:1400)),"status":.string(AgentPresentation.prefix(talk.active && talk.client.ready ? talk.status:talk.client.status,bytes:400)),"level":.number(talk.level),"outputLevel":.number(talk.outputLevel),"provider":.string(talk.client.selectedKey),"providers":.string(json(choices(talk.client.providers.map{["key":$0.address.key,"name":$0.address.plugin]},selected:talk.client.selectedKey)))]
+        let talkState: [String:PluginValue] = ["controls":.string((try? talk.client.controls?.encoded()) ?? ""),"accessAvailable":.boolean(talk.client.accessRequestsAvailable),"active":.boolean(talk.active),"ready":.boolean(talk.client.ready),"mode":.string(talk.mode),"replyPace":.string(talk.quickReplies ? "quick":"default"),"phase":.string(talk.client.awaitingPermission ? "permission" : talk.phase),"partial":.string(AgentPresentation.prefix(talk.recoveryDraft.isEmpty ? talk.partial : talk.recoveryDraft,bytes:1400)),"status":.string(AgentPresentation.prefix(talk.active && talk.client.ready ? talk.status:talk.client.status,bytes:400)),"level":.number(talk.level),"outputLevel":.number(talk.outputLevel),"expression":.string(json(talk.expression.pose)),"expressionEnabled":.boolean(talk.expressionEnabled),"provider":.string(talk.client.selectedKey),"providers":.string(json(choices(talk.client.providers.map{["key":$0.address.key,"name":$0.address.plugin]},selected:talk.client.selectedKey)))]
         var view = PluginCustomView(entry: "chat/index.html", revision: "chat2", state: [
             "talk": .string(json(talkState)),
             "models": .string(json(AgentModelChoice.page(model.models, selected: model.selectedModel, index:modelPage))), "modelPage": .number(Double(min(modelPage,max(0,(model.models.count-1)/12)))), "modelPages": .number(Double(max(1,(model.models.count+11)/12))), "selectedModel": .string(model.selectedModel),
@@ -274,11 +274,13 @@ import NookPluginSDK
             "contextCount": .number(Double(model.catalog.count)), "presence": .string(talk.active ? talk.phase : continual.phase), "watchCount": .number(Double(continual.archive.watches.filter { !$0.dismissed && !$0.terminalSeen }.count))
         ], events: [
             .init("tools"), .init("tool_review", input: .init([.init("id", .string), .init("allow", .boolean)])), .init("link", input: .init([.init("url", .string)])),
-            .init("talk",input:.init([.init("command",.string),.init("value",.string,required:false),.init("context",.boolean,required:false)])),
+            AgentTalkViewControl.definition,
             .init("speech_provider", input: .init([.init("key", .string)])), .init("read", input: .init([.init("id", .string)])), .init("stop_speech"),
             .init("send", input: .init([.init("text", .string), .init("context", .boolean)])), .init("stop"), .init("new"), .init("retry"),
             .init("select", input: .init([.init("id", .string)])), .init("settings", input: .init([.init("command", .string, required:false), .init("id", .string, required:false)])), .init("review"), .init("open", input: .init([.init("page", .string, required:false)])), .init("copy", input: .init([.init("id", .string)]))
         ])
+        view.avatarReactions=true;view.avatarPlayback=speech.avatarPlayback
+        view.state["reactionSpeaking"] = .boolean(speech.avatarPlayback != nil)
         while (try? view.validate()) == nil, messageBudget > 512 {
             messageBudget = max(512, messageBudget / 2)
             shown = AgentPresentation.messages(model.messages, budget: messageBudget)
@@ -290,6 +292,12 @@ import NookPluginSDK
     func handle(_ event: PluginViewEvent) throws {
         if event.panelID == "awareness" { try handleAwareness(event); return }
         guard event.panelID == "conversation" else { throw AgentError.message("Unknown view.") }; try chatView.validate(event)
+        if event.name == PluginAvatarPlayback.event {
+            guard case .string(let raw)=event.values["id"],let id=UUID(uuidString:raw),case .string(let kind)=event.values["kind"] else {throw ModuleProblem("Invalid avatar reaction.")}
+            if kind == "stop" {speech.stopReaction(id)}
+            else if let reaction=PluginAvatarReaction(rawValue:kind), !(talk.active || model.busy) {try speech.react(reaction,id:id)}
+            publish();return
+        }
         switch event.name {
         case "tools": tools.visible = true; openChat()
         case "tool_review": if case .string(let id) = event.values["id"], let id = UUID(uuidString: id), case .boolean(let allow) = event.values["allow"] {
@@ -305,6 +313,7 @@ import NookPluginSDK
             case "settings":talk.stop();try talk.client.openSettings(mode:talk.mode)
             case "mode":if case .string(let value)=event.values["value"]{try talk.chooseMode(value)}
             case "sensitivity":if case .string(let value)=event.values["value"],let number=Int(value){try talk.client.setInterruptionSensitivity(number)}
+            case "expression":try talk.chooseExpression(AgentTalkViewControl.expression(event.values))
             case "pace":if case .string(let value)=event.values["value"]{try talk.chooseReplyPace(value)}
             case "provider":if case .string(let value)=event.values["value"]{talk.client.select(value)}
             default:break
@@ -358,7 +367,7 @@ import NookPluginSDK
             .init("awareness", "Activity", sections: [.init("Continual Agent", continual.phase + " · Open Agent to manage sources and watches.")]),
             .init("context", "Context preview", sections: contextSections.isEmpty ? [.init("No module context", "Allow Nero Agent to receive selected module updates in Nook Settings → Modules → Actions and connections. Receiving an update here does not send it to ChatGPT. Choose an attachment when asking.")] : contextSections)
         ]))
-        snapshot.assistantSpeech = .init(speaking:talk.phase == "speaking",level:talk.outputLevel)
+        snapshot.assistantSpeech = .init(speaking:talk.phase == "speaking",level:talk.outputLevel,expression:talk.expression.pose)
         if !tools.reviews.pending.isEmpty || model.proposal != nil {
             snapshot.attention = .init(id:"action-review",kind:.needsYou,title:"Nero needs your approval")
         }
