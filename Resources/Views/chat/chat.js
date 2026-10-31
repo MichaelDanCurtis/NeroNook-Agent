@@ -5,6 +5,29 @@ function el(tag,text,cls){let n=document.createElement(tag);if(text!==undefined)
 // load external images, or give generated links an executable destination.
 function inline(parent,text){let re=/(\[[^\]\n]{1,200}\]\(https?:\/\/[^\s)]+\)|\*\*[^*]+\*\*|`[^`]+`)/g,pos=0;for(let m;(m=re.exec(text));){parent.append(document.createTextNode(text.slice(pos,m.index)));let link=m[0].match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);if(link){let a=el('a',link[1]);a.href=link[2];a.onclick=e=>{e.preventDefault();emit('link',{url:link[2]});};parent.append(a);}else parent.append(el(m[0][0]==='`'?'code':'strong',m[0].slice(m[0][0]==='`'?1:2,m[0][0]==='`'?-1:-2)));pos=re.lastIndex;}parent.append(document.createTextNode(text.slice(pos)));}
 function markdown(parent,text){let code=false,buf=[],list=null;for(const line of text.split('\n')){if(line.startsWith('```')){if(code){parent.append(el('pre',buf.join('\n')));buf=[];}code=!code;list=null;continue;}if(code){buf.push(line);continue;}let m=line.match(/^\s*(?:[-*]|\d+\.)\s+(.+)/);if(m){if(!list){list=el(/^\s*\d/.test(line)?'ol':'ul');if(list.tagName==='OL')list.start=parseInt(line.trim(),10);parent.append(list);}let li=el('li');inline(li,m[1]);list.append(li);continue;}list=null;let n=el(/^#{1,3}\s/.test(line)?'h3':'p');inline(n,line.replace(/^#{1,3}\s/,''));parent.append(n);}if(code)parent.append(el('pre',buf.join('\n')));}
+// Owned SDK outcomes are literal typed data, never Markdown/model text.
+const outcomeBox=el('section',undefined,'nc-review');outcomeBox.id='actionOutcome';outcomeBox.setAttribute('aria-label','Returned action result');outcomeBox.hidden=true;$('proposal').before(outcomeBox);
+const profileLabel=el('p',undefined,'nc-notice');profileLabel.id='profileLabel';profileLabel.hidden=true;$('error').before(profileLabel);
+function renderActionOutcome(raw){
+ outcomeBox.replaceChildren();outcomeBox.hidden=true;if(!raw)return;
+ let p;try{p=JSON.parse(raw);}catch{return;}
+ if(typeof p.request!=='string'||typeof p.message!=='string'||!Array.isArray(p.requests)||p.requests.length>32||!Number.isInteger(p.fieldCount)||p.fieldCount<0||p.fieldCount>16||!Number.isInteger(p.pageCount)||p.pageCount<1||p.pageCount>16)return;
+ outcomeBox.hidden=false;outcomeBox.append(el('strong','Returned action result · '+p.phase),el('p','Historical owned result, not current device state. Nothing is invoked by these controls.','nc-notice'));
+ outcomeBox.append(el('p',p.address),el('p','Request '+p.request+' · originating message '+p.message));
+ const select=el('select');select.setAttribute('aria-label','Owned action request');for(const id of p.requests){if(typeof id==='string')select.add(new Option(id,id));}select.value=p.request;select.onchange=()=>emit('settings',{command:'outcome_request',id:select.value});outcomeBox.append(select);
+ if(state.actionOutcomeStopID===p.request){let stop=el('button','Stop this action');stop.onclick=()=>emit('settings',{command:'outcome_stop',id:p.request});outcomeBox.append(stop);}
+ if(p.fieldCount===0){outcomeBox.append(el('p',p.phase==='succeeded'?'Completed with no declared output fields.':'No successful returned values.'));return;}
+ outcomeBox.append(el('p',`Field ${p.field+1} of ${p.fieldCount} · ${p.name} · ${p.type} · ${p.present?'present':'absent (optional)'}`));
+ const controls=el('div',undefined,'messageTools');
+ function button(label,enabled,command,value){let b=el('button',label);b.disabled=!enabled;b.onclick=()=>emit('settings',{command,id:String(value)});controls.append(b);}
+ button('Previous field',p.field>0,'outcome_field',p.field-1);button('Next field',p.field+1<p.fieldCount,'outcome_field',p.field+1);outcomeBox.append(controls);
+ if(!p.present)return;
+ const value=el('pre');value.style.whiteSpace='pre-wrap';value.style.overflowWrap='anywhere';value.textContent=p.type==='string'?p.value:(p.type==='number'&&Object.is(p.value,-0)?'-0':JSON.stringify(p.value));outcomeBox.append(value);
+ if(p.type==='string'&&p.value==='')outcomeBox.append(el('p','Empty string · present.','nc-notice'));
+ outcomeBox.append(el('p',`Value page ${p.page+1} of ${p.pageCount} · consecutive exact parts, never an excerpt.`,'nc-notice'));
+ const pages=el('div',undefined,'messageTools');
+ for(const [label,delta] of [['Previous value page',-1],['Next value page',1]]){let b=el('button',label),next=p.page+delta;b.disabled=next<0||next>=p.pageCount;b.onclick=()=>emit('settings',{command:'outcome_page',id:String(next)});pages.append(b);}outcomeBox.append(pages);
+}
 function send(){const text=$('draft').value.trim();if(!text||state.busy||!state.connected)return;if(new TextEncoder().encode(text).length>2048){$('error').textContent='Please keep this message under 2,048 bytes.';$('error').hidden=false;return;}pendingDraft=text;emit('send',{text,context:$('useContext').checked});}
 $('speechProvider').onchange=()=>emit('speech_provider',{key:$('speechProvider').value});$('stopSpeech').onclick=()=>emit('stop_speech');
 $('send').onclick=send;$('stop').onclick=()=>emit('stop');$('new').onclick=()=>emit('new');$('tools').onclick=()=>emit('tools');$('settings').onclick=()=>emit('settings');$('open').onclick=()=>emit('open');$('review').onclick=()=>emit('review');$('retry').onclick=()=>emit('retry');$('historyButton').onclick=()=>{$('history').hidden=!$('history').hidden;};$('closeHistory').onclick=()=>{$('history').hidden=true;};
@@ -17,6 +40,7 @@ $('previousModels').onclick=()=>emit('settings',{command:'model_page',id:String(
 $('nextModels').onclick=()=>emit('settings',{command:'model_page',id:String((state.modelPage||0)+1)});
 $('refreshModels').onclick=()=>emit('settings',{command:'refresh_models'});
 nero.onState(next=>{state=next;
+ renderActionOutcome(state.actionOutcome||'');profileLabel.textContent=state.profileLabel||'';profileLabel.hidden=!state.profileLabel;
  $('previousModels').hidden=(state.modelPages||1)<=1;$('nextModels').hidden=(state.modelPages||1)<=1;$('previousModels').disabled=(state.modelPage||0)<=0;$('nextModels').disabled=(state.modelPage||0)+1>=(state.modelPages||1);
  let models=[];try{models=JSON.parse(state.models||'[]');}catch{}
  const modelChoices=JSON.stringify([models,state.selectedModel]);

@@ -13,9 +13,9 @@ final class ExpressionViewEventTests: XCTestCase {
         // whole shipped script and capture its actual nero.emit payloads; the
         // real SDK validator below, not this bridge stub, admits the event.
         context.evaluateScript("""
-        var captured=[];var nodes={};
-        function node(id){return nodes[id]||(nodes[id]={dataset:{},addEventListener:function(){},querySelector:function(){return node(id+'summary')}})}
-        var document={getElementById:node,querySelectorAll:function(){return []},addEventListener:function(){}};
+        var captured=[];var nodes={};var nextNode=0;
+        function node(id){return nodes[id]||(nodes[id]={dataset:{},before:function(){},setAttribute:function(k,v){this[k]=v},addEventListener:function(){},querySelector:function(){return node(id+'summary')}})}
+        var document={getElementById:node,createElement:function(){return node('created'+nextNode++)},querySelectorAll:function(){return []},addEventListener:function(){}};
         var nero={onState:function(){},emit:function(name,values){captured.push({name:name,values:values});return Promise.resolve()}};
         """)
         context.evaluateScript(source)
