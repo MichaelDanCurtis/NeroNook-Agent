@@ -27,6 +27,13 @@ import NookPluginSDK
 
 @MainActor final class AgentToolbox: ObservableObject {
     @Published private(set) var settings = AgentIntegrationSettings()
+    @Published var localFlowStatus = "Open Nero through NeroNook to use permitted local flow tools."
+    @Published private(set) var localFlowsEnabled: Bool
+    private let defaults: any AgentPreferences
+    private let credentials: any AgentCredentialStore
+    private let childHome: URL?
+    private let defaultWorkingDirectory: URL?
+    static let localFlowsKey = "agent.localFlowsEnabled"
     @Published var visible = false
     @Published private(set) var states: [UUID: String] = [:]
     @Published private(set) var storageError: String?
@@ -43,9 +50,15 @@ import NookPluginSDK
     private var observers: [NSObjectProtocol] = []
     private var locked = false
     private let test = CommandLine.arguments.contains("--protocol-test")
-    init() {
-        file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NeroNook-Plugins/cafe.nero.plugin.agent/tools-v1.json")
-        if !test { do { settings = try .load(file) } catch { storageError = "Tool settings could not be loaded. The file was kept; tools are disabled until repaired."; settings.web = false } }
+    init(defaults: UserDefaults? = nil, settingsFile: URL? = nil, profile: AgentProfile? = nil) {
+        let preferences = profile?.preferences ?? AgentUserDefaultsPreferences(defaults ?? .standard)
+        self.defaults = preferences
+        credentials = profile?.credentials ?? AgentKeychainCredentials()
+        childHome = profile?.childHome; defaultWorkingDirectory = profile?.defaultMCPWorkingDirectory
+        // Unknown or absent settings cannot opt the user into source sharing.
+        localFlowsEnabled = preferences.object(forKey: Self.localFlowsKey) as? Bool == true
+        file = settingsFile ?? profile?.toolsFile ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NeroNook-Plugins/cafe.nero.plugin.agent/tools-v1.json")
+        if !test, profile?.restoreState != false { do { settings = try .load(file) } catch { storageError = "Tool settings could not be loaded. The file was kept; tools are disabled until repaired."; settings.web = false } }
         reviews.changed = { [weak self] in self?.objectWillChange.send(); self?.changed?() }
         mac.review = { [weak self] review in guard let self, !self.locked else { throw CancellationError() }; try await self.reviews.request(review) }
         if !test {
@@ -63,7 +76,15 @@ import NookPluginSDK
     var definitions: [[String: Any]] { IntegrationTools.definitions(mac: settings.mac && !locked, mcp: !sessions.isEmpty && !locked) }
     var web: Bool { settings.web && !locked && storageError == nil && !test }
     var keys: [String: Set<String>] { Dictionary(uniqueKeysWithValues: definitions.compactMap { value in guard let name = value["name"] as? String else { return nil }; return (name, IntegrationTools.argumentKeys[name]!) }) }
-    var summary: String { "\(web ? "Web on" : "Web off") · \(settings.mac ? "Mac on" : "Mac off") · \(sessions.count) MCP connected" }
+    var localFlowsAvailable: Bool { localFlowsEnabled && !locked && storageError == nil }
+    func updateLocalFlows(_ enabled: Bool) {
+        guard storageError == nil else { return }
+        invalidated?(); cancelTurn()
+        localFlowsEnabled = enabled
+        defaults.set(enabled, forKey: Self.localFlowsKey)
+        changed?()
+    }
+    var summary: String { "\(web ? "Web on" : "Web off") · \(settings.mac ? "Mac on" : "Mac off") · \(sessions.count) MCP connected · Local flows \(localFlowsAvailable ? "on" : "off")" }
     private func lock(_ value: Bool) { locked = value; if value { disconnectAll(); invalidated?() }; changed?() }
     func cancelTurn() { epoch = UUID(); reviews.cancel(); mac.clear(); for session in sessions.values { session.cancel() }; changed?() }
     func update(web: Bool? = nil, mac: Bool? = nil) {
@@ -72,20 +93,20 @@ import NookPluginSDK
     }
     func save(_ configuration: MCPConnection, secret: String) throws {
         guard storageError == nil, !test else { throw AgentError.message("Tool settings are unavailable.") }; try configuration.validate()
-        if !secret.isEmpty { try PluginCredentials(pluginID: "cafe.nero.plugin.agent").save(secret, account: "mcp." + configuration.id.uuidString) }
+        if !secret.isEmpty { try credentials.save(secret, account: "mcp." + configuration.id.uuidString) }
         invalidated?(); disconnect(configuration.id)
         if let i = settings.servers.firstIndex(where: { $0.id == configuration.id }) { settings.servers[i] = configuration }
         else { guard settings.servers.count < 16 else { throw AgentError.message("Remove a connection before adding another.") }; settings.servers.append(configuration) }
         persist()
     }
     func remove(_ id: UUID) {
-        invalidated?(); disconnect(id); settings.servers.removeAll { $0.id == id }; try? PluginCredentials(pluginID: "cafe.nero.plugin.agent").remove(account: "mcp." + id.uuidString); persist()
+        invalidated?(); disconnect(id); settings.servers.removeAll { $0.id == id }; try? credentials.remove(account: "mcp." + id.uuidString); persist()
     }
     func connect(_ id: UUID) {
         guard !test, !locked, storageError == nil, !connecting.contains(id), let configuration = settings.servers.first(where: { $0.id == id }) else { return }
         invalidated?(); disconnect(id); connecting.insert(id); states[id] = "Connecting…"
         epoch = UUID()
-        let session = AgentMCPSession(configuration)
+        let session = AgentMCPSession(configuration, childHome: childHome, defaultWorkingDirectory: defaultWorkingDirectory)
         session.onDisconnect = { [weak self, weak session] in
             guard let self, let session, self.sessions[id] === session else { return }
             self.sessions[id] = nil
@@ -112,7 +133,7 @@ import NookPluginSDK
         connectionTasks[id] = Task { [weak self] in
             guard let self else { return }
             do {
-                let secret = configuration.authentication == "bearer" ? try PluginCredentials(pluginID: "cafe.nero.plugin.agent").read(account: "mcp." + id.uuidString) : nil
+                let secret = configuration.authentication == "bearer" ? try credentials.read(account: "mcp." + id.uuidString) : nil
                 var authorizer: OAuthAuthorizer?
                 if configuration.transport == "http", configuration.authentication == "oauth" {
                     let browser = MCPBrowserSignIn(); auth[id] = browser

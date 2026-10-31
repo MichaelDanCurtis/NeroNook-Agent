@@ -96,3 +96,31 @@ private desktop services are not assumed to be public APIs. This is not blanket
 ChatGPT/Codex parity.
 
 [Detailed evidence and limits](../../NeroNook/reports/agent-tools-2026-10-16/README.md).
+
+
+## Local flows · optional source candidate
+
+Tools → Local flows → **Allow local flow tools in chat** is off by default. It
+explicitly permits sending local flow source, literal values, fixtures and results
+to this conversation's configured reasoning provider when Use Nook context is on.
+The host separately grants Discover, Inspect, Author, Test, Publish and ordinary
+published invocation. Inspect covers this Mac's whole local catalog, not just a
+single selected flow. Do not enable this for definitions you cannot share with
+that provider. Raw transfer handles remain memory-only; replies/provider retention
+follow the selected conversation policy.
+
+The active interactive turn receives nook_flow_catalog, nook_flow_call and
+nook_flow_result. SDK ask/decision/evidence requests receive none. Source transfers
+are checked, bounded and paged without truncation. Inspect existing source/schema
+before patching. Draft save and immutable publication each retain complete native
+review; publication never executes the flow. Newly published invocation normally
+uses the next turn's ordinary proposal route. Fixtures simulate supplied results
+and cannot dispatch live providers. Stop/timeout/authority changes retire original
+requests; unknown mutation outcomes are not automatically replayed.
+
+93 local Agent tests, final14client repeat and a separate two-test composition
+qualify source and scripted runtime routing. No actual hosted-model authoring,
+new installed app or grant was tested. Agent's whole-turn180-second bound can
+expire during long transfer/reviews; individual service deadlines are not promises
+of a longer Agent turn. Pages expire on catalog refresh. Native finiteDouble
+source is not portable Flow/n8n compatibility. See the linked host evidence.

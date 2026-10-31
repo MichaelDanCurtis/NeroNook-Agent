@@ -31,10 +31,10 @@ import NookPluginSDK
     private let testMode = CommandLine.arguments.contains("--protocol-test")
     private var persisted = ContinualArchive()
     private var lastCatalog: [PluginCatalogEntry] = []
-    init() {
+    init(profile: AgentProfile? = nil) {
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NeroNook-Plugins/cafe.nero.plugin.agent/continual")
-        files = ContinualFiles(file: root.appendingPathComponent("state-v1.json"))
-        if !testMode { do { archive = try files.load() } catch { storageError = error.localizedDescription } }
+        files = ContinualFiles(file: profile?.continualFile ?? root.appendingPathComponent("state-v1.json"))
+        if !testMode, profile?.restoreState != false { do { archive = try files.load() } catch { storageError = error.localizedDescription } }
         persisted = archive
         context.invalidate(paused: archive.paused)
         for source in archive.sources where source.kind == .window { notices[source.id] = "Choose this window again after restarting Agent." }

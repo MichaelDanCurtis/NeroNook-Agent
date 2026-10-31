@@ -4,17 +4,48 @@ import Combine
 import ModuleCore
 import NookPluginSDK
 
+/// Actual settings-event Stop route, separated so tests need no app/profile construction.
+@MainActor enum AgentSubmittedActionStop {
+    static func send(_ raw: String, model: AgentModel, submitted: Set<UUID>,
+        send: (PluginBusMessage) -> Void) throws {
+        let id = try model.actionOutcomeStopRequest(raw)
+        guard submitted.contains(id) else { throw AgentActionOutcomes.Problem.unavailable }
+        model.actionProgress(id, .init(.cancelling))
+        send(.init(.cancel, requestID: id))
+    }
+}
+
+/// The actual read-continuation decision. Owned interactive reads must use the
+/// values accepted by the registry, not raw SDK success or raw returned values.
+@MainActor enum AgentReadCompletion {
+    static func values(update: PluginRunUpdate, entry: PluginCatalogEntry,
+        catalog: [PluginCatalogEntry], chat: Bool, requestID: UUID,
+        completion: AgentActionOutcomes.Completion?) -> [String: PluginValue]? {
+        guard update.phase == .succeeded, catalog.contains(entry),
+              (try? entry.action?.output.validate(update.values)) != nil else { return nil }
+        return chat ? completion?.succeededValues(requestID: requestID, currentCatalog: catalog) : update.values
+    }
+}
+
 @MainActor final class AgentPlugin: ObservableObject {
     @Published var focusedPanel = "conversation"
-    let model = AgentModel()
+    let profile: AgentProfile
+    let model: AgentModel
     private var modelPage = 0
-    let tools = AgentToolbox()
+    let tools: AgentToolbox
     let speech = PluginSpeechClient()
-    let talk = AgentTalk()
+    let talk: AgentTalk
     private var streaming = false
+    private var negotiatedFeatures: Set<String> = []
+    private var flowGrantSnapshot: Data?
+    private var preserveTurnDuringCatalogAddition = false
+    private lazy var flowCatalog = FlowCatalogClient(send: { [weak self] in self?.bus($0) }, resultBudgetBytes: 60000)
+    static func negotiated(_ offered: [String]) -> Set<String> {
+        Set(offered).intersection(["actions-v1", "action-stream-v1", "actions-long-running-v1"])
+    }
     private var speechObservation: AnyCancellable?
     private var toolsObservation: AnyCancellable?
-    let continual = ContinualModel()
+    let continual: ContinualModel
     let id = "cafe.nero.plugin.agent"
     let hosted = CommandLine.arguments.contains("--neronook-plugin")
     private var session: UUID?
@@ -45,12 +76,31 @@ import NookPluginSDK
     static var decisionAction: PluginRegisteredAction {
         .init("decide", title: "Evaluate a condition with ChatGPT", input: askAction.input, output: .init([.init("reply", .string), .init("decision", .boolean)]), cancellable: true, timeoutSeconds: 180)
     }
-    init() {
+    init(profile: AgentProfile? = nil, runtime: (any AgentReasoningRuntime)? = nil) {
+        let profile = profile ?? .ordinary
+        self.profile = profile
+        model = AgentModel(runtime: runtime, restoreState: profile.restoreState, profile: profile)
+        tools = AgentToolbox(profile: profile)
+        talk = AgentTalk(preferences: profile.preferences)
+        continual = ContinualModel(profile: profile)
         toolsObservation = tools.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
         tools.changed = { [weak self] in self?.objectWillChange.send(); self?.publish() }
-        tools.invalidated = { [weak self] in self?.talk.stop(); self?.model.cancel() }
+        tools.invalidated = { [weak self] in self?.talk.stop(); self?.model.cancel(); self?.flowCatalog.cancelTurn() }
         model.integrationDefinitions = { [weak self] in self?.tools.definitions ?? [] }
         model.integrationKeys = { [weak self] in self?.tools.keys ?? [:] }
+        model.flowToolsEnabled = { [weak self] in self?.tools.localFlowsAvailable == true }
+        model.flowDefinitions = { [weak self] in self?.flowCatalog.definitions ?? [] }
+        model.flowKeys = { [weak self] in
+            guard let self else { return [:] }
+            let names = Set(self.flowCatalog.definitions.compactMap { $0["name"] as? String })
+            return FlowCatalogClient.argumentKeys.filter { names.contains($0.key) }
+        }
+        model.beginFlowTurn = { [weak self] in self?.flowCatalog.beginTurn() }
+        model.cancelFlowTurn = { [weak self] in self?.flowCatalog.cancelTurn() }
+        model.flowTool = { [weak self] name, arguments in
+            guard let self, self.tools.localFlowsAvailable else { throw CancellationError() }
+            return try await self.flowCatalog.run(name: name, arguments: arguments)
+        }
         model.webSearch = { [weak self] in self?.tools.web == true }
         model.integrationTool = { [weak self] name, arguments in guard let self else { throw CancellationError() }; return try await self.tools.run(name, arguments) }
         model.cancelIntegrations = { [weak self] in self?.tools.cancelTurn() }
@@ -58,7 +108,7 @@ import NookPluginSDK
         talk.client.send = { [weak self] in self?.bus($0) }
         talk.changed = { [weak self] in self?.objectWillChange.send();self?.publish() }
         speech.send = { [weak self] in self?.bus($0) }
-        speech.select(UserDefaults.standard.string(forKey: "speechProvider") ?? "")
+        speech.select(profile.preferences.string(forKey: "speechProvider") ?? "")
         speechObservation = speech.objectWillChange.sink { [weak self] in Task { @MainActor in self?.objectWillChange.send(); self?.publish() } }
 
         model.changed = { [weak self] in
@@ -69,15 +119,19 @@ import NookPluginSDK
         continual.read = { [weak self] entry, values in
             guard let self else { throw CancellationError() }; return try await self.invokeRead(entry, values: values, chat: false)
         }
-        continual.invalidatePlanner = { [weak self] in self?.model.invalidateLocalContext() }
+        continual.invalidatePlanner = { [weak self] in
+            guard let self, !self.preserveTurnDuringCatalogAddition else { return }
+            self.model.invalidateLocalContext()
+        }
         model.catalogForPlanner = { [weak self] in self?.continual.plannerCatalog ?? [] }
         model.localContext = { [weak self] in guard let self else { throw CancellationError() }; return try self.continual.cloudContext() }
-        model.readAction = { [weak self] entry, values in
-            guard let self else { throw CancellationError() }; return try await self.invokeRead(entry, values: values, chat: true)
+        model.ownedReadAction = { [weak self] request, entry, values in
+            guard let self else { throw CancellationError() }
+            return try await self.invokeRead(entry, values: values, chat: true, ownedRequest: request)
         }
         model.cancelReads = { [weak self] in
             guard let self else { return }; let pending = self.reads.filter { $0.value.chat }; for id in pending.keys { self.reads[id] = nil }
-            for (id, item) in pending { self.bus(.init(.cancel, requestID: id)); item.continuation.resume(throwing: CancellationError()) }
+            for (id, item) in pending { self.model.actionProgress(id, .init(.cancelling)); self.bus(.init(.cancel, requestID: id)); item.continuation.resume(throwing: CancellationError()) }
         }
         model.complete = { [weak self] request, update in guard let self, self.running.remove(request) != nil else { return }; self.bus(.init(.update, requestID: request, update: update)) }
         if hosted {
@@ -86,31 +140,46 @@ import NookPluginSDK
             FileHandle.standardInput.readabilityHandler = { [weak self] file in
                 let data = file.availableData
                 Task { @MainActor in
-                    guard let self else { return }; guard !data.isEmpty else { self.talk.stop(); self.speech.stop(); self.continual.shutdown(); self.tools.disconnectAll(); self.model.shutdown(); exit(0) }
-                    do { for m in try self.input.append(data) { self.receive(m) } } catch { self.talk.stop(); self.speech.stop(); self.continual.shutdown(); self.tools.disconnectAll(); self.model.shutdown(); exit(1) }
+                    guard let self else { return }; guard !data.isEmpty else { self.talk.stop(); self.speech.stop(); self.continual.shutdown(); self.tools.disconnectAll(); self.flowCatalog.update(catalog: [], features: [], session: nil); self.model.shutdown(); exit(0) }
+                    do { for m in try self.input.append(data) { self.receive(m) } } catch { self.talk.stop(); self.speech.stop(); self.continual.shutdown(); self.tools.disconnectAll(); self.flowCatalog.update(catalog: [], features: [], session: nil); self.model.shutdown(); exit(1) }
                 }
             }
         }
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in Task { @MainActor in self?.publish() } }; self.timer = timer; RunLoop.main.add(timer, forMode: .common)
     }
-    private func invokeRead(_ entry: PluginCatalogEntry, values: [String: PluginValue], chat: Bool) async throws -> [String: PluginValue] {
-        guard session != nil, model.catalog.contains(entry), entry.action?.effect == .readOnly, reads.count < 16 else { throw AgentError.message("That read action is unavailable.") }
-        let id = UUID()
+    private func invokeRead(_ entry: PluginCatalogEntry, values: [String: PluginValue], chat: Bool, ownedRequest: UUID? = nil) async throws -> [String: PluginValue] {
+        let id = ownedRequest ?? UUID()
+        do {
+            guard !FlowCatalogClient.isCatalogAction(entry), session != nil, model.catalog.contains(entry),
+                  entry.action?.effect == .readOnly, reads.count < 16 else { throw AgentError.message("That read action is unavailable.") }
+            if chat { guard ownedRequest != nil else { throw AgentActionOutcomes.Problem.invalid }; try model.validateOwnedReadStart(id, entry: entry) }
+        } catch { if chat { model.actionProgress(id, .init(.failed)) }; throw error }
         return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
+            do { try Task.checkCancellation() }
+            catch { if chat { model.actionProgress(id, .init(.failed)) }; throw error }
             return try await withCheckedThrowingContinuation { continuation in
+                do { if chat { try model.validateOwnedReadStart(id, entry: entry) } }
+                catch { model.actionProgress(id, .init(.failed)); continuation.resume(throwing: error); return }
                 reads[id] = (entry, chat, continuation)
+                if chat { model.actionProgress(id, .init(.running)) }
                 bus(.init(.invoke, requestID: id, address: entry.address, values: values))
                 Task { [weak self] in
                     try? await Task.sleep(for: .seconds(30))
                     guard let self, let pending = self.reads.removeValue(forKey: id) else { return }
-                    self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: AgentError.message("The Nook tool did not respond in time."))
+                    if pending.chat { self.model.actionProgress(id, .init(.cancelling)) }; self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: AgentError.message("The Nook tool did not respond in time."))
                 }
             }
         } onCancel: { Task { @MainActor [weak self] in
             guard let self, let pending = self.reads.removeValue(forKey: id) else { return }
-            self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: CancellationError())
+            if pending.chat { self.model.actionProgress(id, .init(.cancelling)) }; self.bus(.init(.cancel, requestID: id)); pending.continuation.resume(throwing: CancellationError())
         } }
+    }
+    private func refreshFlowStatus(_ entries: [PluginCatalogEntry]) {
+        guard session != nil, PluginFlowCatalog.requiredFeatures.isSubset(of: negotiatedFeatures) else {
+            tools.localFlowStatus = "Local flow tools are unavailable in this Nook session."; return
+        }
+        let count = entries.filter { FlowCatalogClient.matches($0) }.count
+        tools.localFlowStatus = count == 0 ? "No permitted local flow catalog actions are available." : "\(count) permitted local flow catalog actions available. Your invocation grants remain separate."
     }
     func configure() {
         model.settingsVisible = true; openChat()
@@ -119,11 +188,14 @@ import NookPluginSDK
         guard message.pluginID == id else { exit(1) }
         if session == nil {
             guard message.type == "hello" else { exit(1) }; session = message.session; PluginAppearanceStore.shared.beginSession(pluginID:id,session:message.session)
+            negotiatedFeatures = Self.negotiated(message.features ?? [])
+            flowCatalog.update(catalog: [], features: negotiatedFeatures, session: session)
+            refreshFlowStatus([])
             streaming = message.features?.contains("action-stream-v1") == true
             talk.client.accessRequestsAvailable = message.features?.contains("action-access-v1") == true
             customViews = message.features?.contains("custom-views-v1") == true
             forms = message.features?.contains("forms-v1") == true
-            emit("ready", features: ["appearance-v1", "dashboard-v1", "panels-v1", "actions-v1", "forms-v1"] + (streaming ? ["action-stream-v1"] : []) + (talk.client.accessRequestsAvailable ? ["action-access-v1"] : []) + (customViews ? ["custom-views-v1"] : []))
+            emit("ready", features: ["appearance-v1", "dashboard-v1", "panels-v1", "actions-v1", "forms-v1"] + (streaming ? ["action-stream-v1"] : []) + (negotiatedFeatures.contains("actions-long-running-v1") ? ["actions-long-running-v1"] : []) + (talk.client.accessRequestsAvailable ? ["action-access-v1"] : []) + (customViews ? ["custom-views-v1"] : []))
             if message.features?.contains("actions-v1") == true { bus(.init(.register, registration: .init(actions: [Self.askAction, Self.decisionAction, Self.evidenceAction, Self.evidenceChatAction]))); bus(.init(.discover)) }
             publish(); return
         }
@@ -137,17 +209,31 @@ import NookPluginSDK
         }
         if message.type == "viewEvent", let event = message.viewEvent { do { try handle(event) } catch { model.status = error.localizedDescription }; return }
         guard let message = message.bus else { return }
+        // Flow stream/update/failure replies must be consumed before the
+        // ordinary read-action switch; only the owning client has its assembly.
+        if flowCatalog.receive(message) { return }
         speech.receive(message); talk.client.receive(message)
         switch message.operation {
         case .catalog:
             if (try? catalog.receive(message)) == true {
+                let previousOrdinary = model.catalog
                 let oldChannels = Dictionary(uniqueKeysWithValues: model.catalog.compactMap { entry in
                     entry.channel?.kind == .state ? (entry.address, entry) : nil
                 })
+                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+                let flowEntries = catalog.entries.filter { FlowCatalogClient.isCatalogAction($0) }.sorted { $0.address.key < $1.address.key }
+                let nextFlowGrants = try? encoder.encode(flowEntries)
+                // Publication can add an ordinary wrapper before its terminal
+                // result. Preserve that call while the exact catalog grants are
+                // unchanged; the client separately fences selected dependencies.
+                if nextFlowGrants != flowGrantSnapshot { model.invalidateFlowCatalog() }
+                flowGrantSnapshot = nextFlowGrants
+                flowCatalog.update(catalog: catalog.entries, features: negotiatedFeatures, session: session)
+                refreshFlowStatus(catalog.entries)
                 speech.catalog(catalog.entries);talk.client.catalog(catalog.entries)
-                model.catalog = catalog.entries.filter { $0.address.plugin != id && !PluginSpeechContract.accepts($0) && !PluginSpeechConversation.accepts($0) }
+                model.catalog = AgentTools.ordinaryCatalog(catalog.entries).filter { $0.address.plugin != id && !PluginSpeechContract.accepts($0) && !PluginSpeechConversation.accepts($0) }
                 for key in Array(reads.keys) where !model.catalog.contains(reads[key]!.entry) {
-                    reads.removeValue(forKey: key)?.continuation.resume(throwing: AgentError.message("Tool access changed. The result was discarded."))
+                    if let pending = reads.removeValue(forKey: key) { if pending.chat { model.actionProgress(key, .init(.cancelling)) }; pending.continuation.resume(throwing: AgentError.message("Tool access changed. The result was discarded.")) }
                 }
                 let newChannels = Dictionary(uniqueKeysWithValues: model.catalog.compactMap { entry in
                     entry.channel?.kind == .state ? (entry.address, entry) : nil
@@ -169,7 +255,15 @@ import NookPluginSDK
                 for address in permitted.subtracting(subscriptions).union(changed.intersection(permitted)) {
                     bus(.init(.subscribe, address: address))
                 }
-                subscriptions = permitted; continual.catalogChanged(); publish()
+                subscriptions = permitted
+                // ContinualModel refreshes its own observations on an addition.
+                // Its synchronous invalidation callback must not cancel the
+                // publication that just added a wrapper. Existing entries must
+                // all remain permitted; removal or mutation still retires work.
+                preserveTurnDuringCatalogAddition = model.hasFlowToolsForTurn && previousOrdinary.allSatisfy { model.catalog.contains($0) }
+                continual.catalogChanged()
+                preserveTurnDuringCatalogAddition = false
+                publish()
             }
         case .event:
             if let address = message.address, subscriptions.contains(address),
@@ -213,20 +307,35 @@ import NookPluginSDK
             model.ask(prompt, context: context, decision: message.address?.name == "decide", request: message.requestID)
         case .cancel: model.cancel(request: message.requestID)
         case .update:
+            if let entry = model.actionOutcomes.entry(message.requestID), let address = message.address, address != entry.address {
+                model.actionProgress(message.requestID, .init(.failed)); submitted.remove(message.requestID)
+                reads.removeValue(forKey: message.requestID)?.continuation.resume(throwing: AgentActionOutcomes.Problem.invalid)
+                return
+            }
+            let completion = message.update.flatMap { model.actionProgress(message.requestID, $0) }
             if let pending = reads[message.requestID], let update = message.update, update.phase.terminal {
                 reads[message.requestID] = nil
-                if update.phase == .succeeded, model.catalog.contains(pending.entry), (try? pending.entry.action?.output.validate(update.values)) != nil { pending.continuation.resume(returning: update.values) }
+                if let values = AgentReadCompletion.values(update: update, entry: pending.entry,
+                    catalog: model.catalog, chat: pending.chat, requestID: message.requestID,
+                    completion: completion) { pending.continuation.resume(returning: values) }
                 else { pending.continuation.resume(throwing: AgentError.message(update.message.isEmpty ? "The Nook tool could not complete." : update.message)) }
             }
-            if submitted.contains(message.requestID), let update = message.update {
-                model.actionProgress(message.requestID, update)
-                if update.phase.terminal { submitted.remove(message.requestID) }
+            if submitted.contains(message.requestID), message.update?.phase.terminal == true {
+                submitted.remove(message.requestID)
             }
         case .failure:
-            reads.removeValue(forKey: message.requestID)?.continuation.resume(throwing: AgentError.message(message.error ?? "The tool request failed."))
-            if submitted.remove(message.requestID) != nil { model.actionProgress(message.requestID, .init(.failed, message: message.error ?? "Action request failed")) }
+            model.actionProgress(message.requestID, .init(.failed))
+            if let pending = reads.removeValue(forKey: message.requestID) { pending.continuation.resume(throwing: AgentError.message(message.error ?? "The tool request failed.")) }
+            submitted.remove(message.requestID)
         default: break
         }
+    }
+    // Transport work only: replay history and completed result records are not active work.
+    // Flow tools are owned by the model's busy turn and retire with cancelFlowTurn.
+    var managementIdle: Bool {
+        !model.busy && !model.connecting && !model.modelsLoading && model.proposal == nil && !model.hasPendingActionOutcomes &&
+        !talk.active && !speech.active && submitted.isEmpty && reads.isEmpty && running.isEmpty &&
+        tools.reviews.pending.isEmpty && tools.connecting.isEmpty
     }
     func openChat() {
         NSApp.activate(ignoringOtherApps: true)
@@ -245,9 +354,16 @@ import NookPluginSDK
         do {
             guard session != nil else { throw AgentError.message("Open this module through NeroNook to review an action.") }
             let (entry, values) = try model.proposalForReview()
-            let request = UUID(); submitted.insert(request); model.proposal = nil
+            guard !FlowCatalogClient.isCatalogAction(entry) else { throw AgentError.message("Use the dedicated Local flows tools for native source and publication review.") }
+            let request = UUID(); try model.beginActionOutcome(request, entry: entry, proposal: true)
+            submitted.insert(request); model.proposal = nil
             bus(.init(.invoke, requestID: request, address: entry.address, values: values)); model.actionProgress(request, .init(.waitingReview, message: "Waiting for action review"))
         } catch { model.status = error.localizedDescription; model.proposal = nil }
+    }
+    private var actionOutcomeStopID: String {
+        guard let page = model.actionOutcomeSelection, let id = UUID(uuidString: page.request),
+              submitted.contains(id), page.phase == PluginRunPhase.waitingReview.rawValue || page.phase == PluginRunPhase.running.rawValue else { return "" }
+        return page.request
     }
     var chatView: PluginCustomView {
         func json<T: Encodable>(_ value: T) -> String { String(data: (try? JSONEncoder().encode(value)) ?? Data(), encoding: .utf8) ?? "[]" }
@@ -268,8 +384,10 @@ import NookPluginSDK
             "speechProvider": .string(speech.selectedKey), "speechActive": .boolean(speech.active), "speechStatus": .string(String(speech.status.prefix(240))),
             "messages": .string(shown.json), "history": .string(json(history)), "conversation": .string(model.currentID.uuidString),
             "busy": .boolean(model.busy), "connected": .boolean(model.email != nil), "status": .string(model.status),
+            "profileLabel": .string(profile.visibleLabel), "managementIdle": .boolean(managementIdle),
             "title": .string(model.conversation.title), "retention": .number(Double(model.retentionDays)),
             "historyError": .string(model.historyError ?? ""), "omitted": .boolean(shown.omitted),
+            "actionOutcome": .string(model.actionOutcomeJSON), "actionOutcomeStopID": .string(actionOutcomeStopID),
             "proposal": .string(model.proposal.map { AgentPresentation.prefix(($0.action ?? "") + "\n" + $0.arguments, bytes: 1600) } ?? ""),
             "contextCount": .number(Double(model.catalog.count)), "presence": .string(talk.active ? talk.phase : continual.phase), "watchCount": .number(Double(continual.archive.watches.filter { !$0.dismissed && !$0.terminalSeen }.count))
         ], events: [
@@ -286,6 +404,18 @@ import NookPluginSDK
             shown = AgentPresentation.messages(model.messages, budget: messageBudget)
             view.state["messages"] = .string(shown.json)
             view.state["omitted"] = .boolean(shown.omitted)
+        }
+        if (try? view.validate()) == nil, !model.actionOutcomeJSON.isEmpty {
+            // Never truncate an owned value to make the state fit. Show an explicit
+            // result-focused state until the user pages it or state shrinks.
+            let profileLabel = view.state["profileLabel"], managementIdle = view.state["managementIdle"]
+            view.state = ["actionOutcome": .string(model.actionOutcomeJSON), "actionOutcomeStopID": .string(actionOutcomeStopID),
+                "messages": .string("[]"), "history": .string("[]"),
+                "conversation": .string(model.currentID.uuidString), "connected": .boolean(model.email != nil),
+                "busy": .boolean(model.busy), "status": .string("Returned action result · other panels omitted to fit the view limit"),
+                "omitted": .boolean(true)]
+            if let profileLabel { view.state["profileLabel"] = profileLabel }
+            if let managementIdle { view.state["managementIdle"] = managementIdle }
         }
         return view
     }
@@ -318,7 +448,7 @@ import NookPluginSDK
             case "provider":if case .string(let value)=event.values["value"]{talk.client.select(value)}
             default:break
             }
-        case "speech_provider": if case .string(let key) = event.values["key"] { speech.select(key); UserDefaults.standard.set(key, forKey: "speechProvider") }
+        case "speech_provider": if case .string(let key) = event.values["key"] { speech.select(key); profile.preferences.set(key, forKey: "speechProvider") }
         case "read": if case .string(let id) = event.values["id"], let message = model.messages.first(where: { $0.id.uuidString == id && $0.role == "assistant" && $0.phase == "complete" }) { try speech.read(message.text) }
         case "stop_speech": speech.stop()
         case "send": speech.stop(); if case .string(let text) = event.values["text"], case .boolean(let context) = event.values["context"], !model.busy { if talk.active {try talk.sendText(text)} else {model.sendChat(text, useContext: context)} }
@@ -331,7 +461,14 @@ import NookPluginSDK
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string); model.status = "Copied message"
             }
         case "settings":
-            if case .string("model") = event.values["command"], case .string(let value) = event.values["id"] { try model.chooseModel(value) }
+            if case .string("outcome_stop") = event.values["command"], case .string(let request) = event.values["id"] {
+                try AgentSubmittedActionStop.send(request, model: model, submitted: submitted, send: bus); publish()
+            }
+            else if case .string(let command) = event.values["command"], command.hasPrefix("outcome_"),
+               case .string(let value) = event.values["id"] {
+                try model.selectActionOutcome(command: command, value: value); publish()
+            }
+            else if case .string("model") = event.values["command"], case .string(let value) = event.values["id"] { try model.chooseModel(value) }
             else if case .string("refresh_models") = event.values["command"] { model.refreshModels() }
             else if case .string("model_page") = event.values["command"], case .string(let value) = event.values["id"], let page = Int(value), page >= 0, page < max(1,(model.models.count+11)/12) { modelPage = page; publish() }
             else { configure() }
@@ -379,12 +516,39 @@ import NookPluginSDK
     private func emit(_ type: String, features: [String]? = nil, snapshot: PluginSnapshot? = nil, bus: PluginBusMessage? = nil) {
         guard let session else { return }; if type != "ready" { sequence += 1 }
         do { try FileHandle.standardOutput.write(contentsOf: PluginMessage(type: type, pluginID: id, session: session, sequence: sequence, snapshot: snapshot, features: features, bus: bus).encoded()) }
-        catch { tools.disconnectAll(); continual.shutdown(); model.shutdown(); exit(0) }
+        catch { tools.disconnectAll(); flowCatalog.update(catalog: [], features: [], session: nil); continual.shutdown(); model.shutdown(); exit(0) }
+    }
+}
+
+@MainActor final class AgentStartup: ObservableObject {
+    let plugin: AgentPlugin?
+    let error: String?
+    init() {
+        do {
+            let profile = try AgentProfile.select(marker: Bundle.main.object(forInfoDictionaryKey: "NeroAgentReviewProfile"),
+                bundleURL: Bundle.main.bundleURL, workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
+                hosted: CommandLine.arguments.contains("--neronook-plugin"))
+            plugin = AgentPlugin(profile: profile); error = nil
+        } catch { plugin = nil; self.error = error.localizedDescription }
     }
 }
 
 @main struct NeroAgentApp: App {
-    @StateObject private var plugin: AgentPlugin
-    init() { let plugin = AgentPlugin(); _plugin = StateObject(wrappedValue: plugin) }
-    var body: some Scene { WindowGroup { AgentView(plugin: plugin, model: plugin.model, continual: plugin.continual).pluginThemed().onAppear { if plugin.hosted { NSApp.windows.first { $0.canBecomeKey }?.orderOut(nil) } } }.defaultSize(width: 850, height: 540) }
+    @StateObject private var startup: AgentStartup
+    init() { _startup = StateObject(wrappedValue: AgentStartup()) }
+    var body: some Scene {
+        WindowGroup {
+            if let plugin = startup.plugin {
+                VStack(spacing: 0) {
+                    if !plugin.profile.visibleLabel.isEmpty { Text(plugin.profile.visibleLabel).font(.caption).padding(8) }
+                    AgentView(plugin: plugin, model: plugin.model, continual: plugin.continual)
+                }.pluginThemed().onAppear { if plugin.hosted { NSApp.windows.first { $0.canBecomeKey }?.orderOut(nil) } }
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Agent profile unavailable").font(.headline)
+                    Text(startup.error ?? "Owner profile was not opened.")
+                }.padding(24)
+            }
+        }.defaultSize(width: 850, height: 540)
+    }
 }

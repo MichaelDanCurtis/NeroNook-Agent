@@ -1,0 +1,5 @@
+.nc-history-search{display:flex;gap:8px;align-items:center;margin-top:12px}
+.nc-history-search input{min-width:0;flex:1}
+.nc-history-search button{flex:none}
+#historyResult{min-height:1.4em;margin:8px 0}
+html[data-nook-ui] #conversations button[hidden]{display:none}

@@ -1,3 +1,24 @@
+**October 29 · installed local Agent 0.5.23:** Find in conversation searches loaded
+message bodies with Command–F, literal highlights and match navigation. Actual
+native menu/keyboard/search/no-match/composer-fit checks pass. The installed
+program is unchanged from 0.5.20; broader development Flow/Codex source remains
+uninstalled. Existing eight healthy Agent scopes were refreshed, all forty scope
+definitions retained. [Verification and limits](reports/chat-find-2026-10-29/README.md).
+
+**October 29 · installed local Agent0.5.24:** conversation title filtering, Clear,
+counts and empty/no-match feedback; Find/history exclude each other. Native filter,
+panel transitions and Escape focus pass; eight composed keyboard/IME guard cases
+pass in the controller. Same compiled program/provider runtime; no new model calls
+or capture. [Current evidence and limits](reports/chat-history-filter-2026-10-29/README.md).
+
+**October 24 · local source candidate:** optional Local flows tools connect interactive
+Nero Chat/Talk to the independently granted host catalog. Tools → Local flows is
+off by default and explains source sharing with your reasoning provider; Use Nook
+context must also be on. Complete native source/publication review is separate
+from invocation. 93 Agent tests plus a final14client repeat and two composed actual
+host-source tests pass. No installed/version/account/grant/public changes.
+[Evidence and limitations](../NeroNook/reports/flow-agent-tools-2026-10-23/README.md).
+
 **October 20 · local 0.5.19:** avatar tickle and playful Zoom use the current local speech selection through the shared SDK, with measured mouths, exact cancellation and a silent Wave/Twirl menu. Existing voice settings and action scopes are retained. [Installed checks and limits](../NeroNook/reports/avatar-playful-reactions-2026-10-20/README.md). Local only.
 
 **October 19 · local 0.5.15 installed:** shared native/web avatar articulation adds larger pointer-following turns, tilt, lean and a floating offset. Eyes and speech remain independent. [Qualification and limits](../NeroNook/reports/avatar-articulation-2026-10-19/README.md). Local only.

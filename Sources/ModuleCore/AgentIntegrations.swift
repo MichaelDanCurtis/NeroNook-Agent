@@ -128,11 +128,14 @@ public enum IntegrationTools {
     private var epoch = UUID()
     private var operationEpoch = UUID()
     private let requestTimeout: Duration
+    let childHome: URL?
+    let defaultWorkingDirectory: URL?
     private var retired = false
     public var elicitation: ((CreateElicitation.Parameters) async throws -> CreateElicitation.Result)?
     public var onDisconnect: (() -> Void)?
-    public init(_ configuration: MCPConnection, requestTimeout: Duration = .seconds(90)) {
+    public init(_ configuration: MCPConnection, requestTimeout: Duration = .seconds(90), childHome: URL? = nil, defaultWorkingDirectory: URL? = nil) {
         self.configuration = configuration; self.requestTimeout = requestTimeout
+        self.childHome = childHome; self.defaultWorkingDirectory = defaultWorkingDirectory
     }
     var pendingOperationCount: Int { activeRequests.count }
     public func connect(secret: String? = nil, authorizer: OAuthAuthorizer? = nil) async throws {
@@ -141,11 +144,12 @@ public enum IntegrationTools {
         let transport: any Transport
         if configuration.transport == "stdio" {
             guard FileManager.default.isExecutableFile(atPath: configuration.command) else { throw AgentError.message("MCP executable is missing. Choose an installed executable.") }
+            if let childHome { try FileManager.default.createDirectory(at: childHome, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
             let child = Process(), input = Pipe(), output = Pipe()
             child.executableURL = URL(fileURLWithPath: configuration.command); child.arguments = configuration.arguments
-            child.environment = ["HOME": FileManager.default.homeDirectoryForCurrentUser.path, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
+            child.environment = ["HOME": (childHome ?? FileManager.default.homeDirectoryForCurrentUser).path, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"]
             if configuration.authentication == "bearer", let secret { child.environment?["MCP_API_KEY"] = secret }
-            child.currentDirectoryURL = URL(fileURLWithPath: configuration.workingDirectory.isEmpty ? NSHomeDirectory() : configuration.workingDirectory)
+            child.currentDirectoryURL = URL(fileURLWithPath: configuration.workingDirectory.isEmpty ? (defaultWorkingDirectory?.path ?? NSHomeDirectory()) : configuration.workingDirectory)
             child.standardInput = input; child.standardOutput = output; child.standardError = FileHandle.nullDevice
             child.terminationHandler = { [weak self] child in Task { @MainActor in
                 guard let self, self.epoch == token, self.process === child else { return }

@@ -1,0 +1,14 @@
+.nc-find[hidden]{display:none}
+html[data-nook-ui] body.nc-app{position:relative}
+html[data-nook-ui] body.nc-app #chatFind{position:absolute;inset:60px 24px auto;z-index:25;display:flex;align-items:center;gap:8px;width:auto;height:auto;min-height:0;max-height:none;flex:none;margin:0;padding:8px 10px;border:0;border-radius:14px;background:color-mix(in srgb,var(--nook-elevated) 88%,transparent);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);box-shadow:0 6px 24px #00000018}
+html[data-nook-ui] body.nc-app:has(#chatFind:not([hidden])) #timeline{padding-top:60px;scroll-padding-top:60px}
+.nc-find input{min-width:0;flex:1;background:transparent;color:inherit;border:0;border-radius:8px;padding:6px;font:inherit}
+.nc-find input:focus-visible{outline:2px solid Highlight;outline-offset:2px}
+.nc-find output{font-size:12px;white-space:nowrap;opacity:.75;font-variant-numeric:tabular-nums}
+.nc-find button{flex-shrink:0;min-width:28px;min-height:28px;padding:4px 7px;border:0;border-radius:10px;color:inherit;background:color-mix(in srgb,currentColor 8%,transparent);font:inherit}
+.nc-find button:hover:not(:disabled){background:color-mix(in srgb,currentColor 15%,transparent)}
+.nc-find button:disabled{opacity:.35}
+.nc-find button:focus-visible{outline:2px solid Highlight;outline-offset:2px}
+mark.nc-find-hit{color:inherit;background:color-mix(in srgb,Highlight 30%,transparent);border-radius:3px}
+mark.nc-find-current{background:color-mix(in srgb,Highlight 60%,transparent);outline:1px solid Highlight}
+@media(max-width:460px){html[data-nook-ui] body.nc-app #chatFind{gap:4px;inset-inline:12px}.nc-find output{font-size:11px}.nc-find input{font-size:13px}}
