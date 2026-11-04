@@ -13,8 +13,9 @@ import NookPluginSDK
         guard active,client.ready else { throw AgentError.message("Start Talk before enabling expressive delivery.") }
         expressionEnabled=enabled; if !enabled { expression.clear() }; changed?()
     }
-    @Published var mode = UserDefaults.standard.string(forKey:"talkDuplex") ?? "half"
-    @Published var quickReplies = UserDefaults.standard.object(forKey:"talkQuickReplies") as? Bool ?? true
+    @Published var mode: String
+    @Published var quickReplies: Bool
+    private let preferences: any AgentPreferences
     @Published var phase = "idle"
     @Published var partial = ""
     @Published var status = "Press Talk to start"
@@ -29,7 +30,11 @@ import NookPluginSDK
     private var useContext=false
     private var observations:[NSObjectProtocol]=[]
     private var clientObservation:AnyCancellable?
-    init(){
+    init(preferences: (any AgentPreferences)? = nil){
+        let preferences = preferences ?? AgentUserDefaultsPreferences()
+        self.preferences = preferences
+        mode = preferences.string(forKey: "talkDuplex") ?? "half"
+        quickReplies = preferences.object(forKey: "talkQuickReplies") as? Bool ?? true
         expression.changed = { [weak self] in self?.changed?() }
         client.event={ [weak self] in self?.receive($0) }
         client.ended={ [weak self] in self?.retired() }
@@ -40,7 +45,7 @@ import NookPluginSDK
     var active:Bool{client.active}
     func chooseReplyPace(_ value:String) throws {
         guard ["quick","default"].contains(value) else{throw AgentError.message("Choose a reply pace")}
-        quickReplies=value=="quick";UserDefaults.standard.set(quickReplies,forKey:"talkQuickReplies");changed?()
+        quickReplies=value=="quick";preferences.set(quickReplies,forKey:"talkQuickReplies");changed?()
     }
     func start(context:Bool) throws {
         guard available(),let model,!model.busy,model.email != nil else{throw AgentError.message("Connect the agent and finish the current reply before Talk.")}
@@ -51,7 +56,7 @@ import NookPluginSDK
     func chooseMode(_ value:String) throws {
         let next=try PluginSpeechConversation.mode(value)
         if client.ready{try client.input(PluginSpeechConversation.values("mode",mode:next))}
-        else{mode=next;UserDefaults.standard.set(next,forKey:"talkDuplex")};changed?()
+        else{mode=next;preferences.set(next,forKey:"talkDuplex")};changed?()
     }
     func sendText(_ text:String) throws {
         guard active,client.ready else {throw AgentError.message("Wait for local speech to be ready.")}
@@ -74,9 +79,9 @@ import NookPluginSDK
         func text(_ key:String)->String{if case .string(let x)=values[key]{return x};return ""}
         switch kind {
         case "ready","listening":
-            if ["full","half"].contains(text("mode")){mode=text("mode");UserDefaults.standard.set(mode,forKey:"talkDuplex")}
+            if ["full","half"].contains(text("mode")){mode=text("mode");preferences.set(mode,forKey:"talkDuplex")}
             phase="listening";status=text("text").isEmpty ? "Listening" : text("text");partial=""
-        case "mode":let next=text("mode");if ["full","half"].contains(next){mode=next;UserDefaults.standard.set(next,forKey:"talkDuplex")};if !text("text").isEmpty{status=text("text")}
+        case "mode":let next=text("mode");if ["full","half"].contains(next){mode=next;preferences.set(next,forKey:"talkDuplex")};if !text("text").isEmpty{status=text("text")}
         case "meter":if case .number(let x)=values["level"]{level=x};if phase=="listening",!text("text").isEmpty{status=text("text")}
         case "playbackMeter":
             if case .number(let n)=values["turn"],n==Double(turn),phase=="speaking",case .number(let x)=values["level"] { outputLevel=PluginAvatarSpeech.weight(x,speaking:true) } else { outputLevel=0 }

@@ -100,13 +100,14 @@ public enum AgentRuntime {
     public var failed: ((String) -> Void)?
     public var diagnostic: ((String) -> Void)?
     public let directory: URL
+    let childHome: URL?
     private var process: Process?
     private var input: Pipe?
     private var buffer = Data()
     private var counter = 0
     private var generation = UUID()
     private var pending: [Int: CheckedContinuation<[String: Any], Error>] = [:]
-    public init(directory: URL) { self.directory = directory }
+    public init(directory: URL, childHome: URL? = nil) { self.directory = directory; self.childHome = childHome }
     public func start(binary: URL = AgentRuntime.defaultBinary) async throws {
         stop()
         guard FileManager.default.isExecutableFile(atPath: binary.path) else { throw AgentError.message("Choose the installed Codex runtime in Settings.") }
@@ -114,11 +115,12 @@ public enum AgentRuntime {
         let work = directory.appendingPathComponent("workspace"), tmp = directory.appendingPathComponent("tmp")
         for folder in [work, tmp] { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
         try Data(AgentRuntime.configuration.utf8).write(to: directory.appendingPathComponent("config.toml"), options: .atomic)
+        if let childHome { try FileManager.default.createDirectory(at: childHome, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
         let child = Process(), output = Pipe(), input = Pipe()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/sandbox-exec")
         child.arguments = ["-p", AgentRuntime.sandbox(binary: binary, directory: directory), binary.path, "app-server", "--strict-config", "--listen", "stdio://"]
         child.currentDirectoryURL = work
-        child.environment = ["HOME": FileManager.default.homeDirectoryForCurrentUser.path, "CODEX_HOME": directory.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": tmp.path]
+        child.environment = ["HOME": (childHome ?? FileManager.default.homeDirectoryForCurrentUser).path, "CODEX_HOME": directory.path, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": tmp.path]
         child.standardInput = input; child.standardOutput = output
         if diagnostic != nil {
             let errors = Pipe(); child.standardError = errors

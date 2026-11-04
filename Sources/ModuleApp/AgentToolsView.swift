@@ -40,6 +40,14 @@ struct AgentToolsView: View {
                             }
                         }.padding(8)
                     }
+                    PluginSettingsCard {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle("Local flows", isOn: Binding(get: { tools.localFlowsEnabled }, set: { tools.updateLocalFlows($0) }))
+                            Text(tools.localFlowStatus).font(.caption).pluginSecondaryText()
+                            Text("When enabled with Use Nook context for a Chat or Talk turn, Nero may share your owner-local flow catalog source, supplied fixtures and returned results with your selected reasoning provider. This choice is off by default and does not enable background context or SDK workflow questions.").font(.caption).pluginSecondaryText()
+                            Text("NeroNook independently grants discovery, source inspection, authoring, fixture testing, publication and invocation. Fixture tests stay local and do not call live providers. Authoring and publication still require the final native source or publication review. Publishing does not run a flow; invocation is a separate reviewed action. Nothing automatically runs or replays after Stop, restart or a catalog change.").font(.caption).pluginSecondaryText()
+                        }.padding(8)
+                    }
                     HStack { Text("MCP connections").font(.headline); Spacer(); Button("Add connection…") { editing = .init() } }
                     Text("Connect services separately. Nero never imports this Mac's Codex or browser credentials. A local MCP server runs as your macOS user; connect only software you trust.").font(.caption).pluginSecondaryText()
                     if tools.settings.servers.isEmpty {

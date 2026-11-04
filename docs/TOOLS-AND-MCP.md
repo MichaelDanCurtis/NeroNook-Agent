@@ -1,5 +1,21 @@
 # Agent tools and MCP · 0.5
 
+**Current local browser delivery168 (Agent0.5.29/build9):** **Use my browser**
+selects the explicit Browser MCP connection using the paired signed-in Chrome
+profile. **Unattended browser** selects agent-browser with independent headless
+state. Tools & connections contains both saved local launchers; click Connect
+after Agent restarts. Both currently expose ten reviewed typed operations.
+Search the web remains source retrieval. Mode selection supplies model guidance;
+the actual connection/action review remains authoritative.
+
+Raw Browser MCP batches can continue after caller cancellation. Nero's local
+adapter instead sends one action per request and retains the original upstream
+call until its reply; new input is refused while it is finishing or uncertain.
+Already emitted input is not undone. Do not delete a retained pending-operation
+record to force a retry. This is a local trusted-software integration, not full
+Fuego interactive-profile or cross-platform qualification. [Installation,
+tests and limits](../../NeroNook/reports/browser-local-integration-2026-11-03/README.md).
+
 The owner requested web browsing, Mac awareness/control and MCP access in both
 typed and spoken conversation. Preserve the working 0.4 conversation and the
 independent Voice provider. The host remains a generic router.
@@ -96,3 +112,39 @@ private desktop services are not assumed to be public APIs. This is not blanket
 ChatGPT/Codex parity.
 
 [Detailed evidence and limits](../../NeroNook/reports/agent-tools-2026-10-16/README.md).
+
+
+## Local flows · optional source candidate
+
+Tools → Local flows → **Allow local flow tools in chat** is off by default. It
+explicitly permits sending local flow source, literal values, fixtures and results
+to this conversation's configured reasoning provider when Use Nook context is on.
+The host separately grants Discover, Inspect, Author, Test, Publish and ordinary
+published invocation. Inspect covers this Mac's whole local catalog, not just a
+single selected flow. Do not enable this for definitions you cannot share with
+that provider. Raw transfer handles remain memory-only; replies/provider retention
+follow the selected conversation policy.
+
+The active interactive turn receives nook_flow_catalog, nook_flow_call and
+nook_flow_result. SDK ask/decision/evidence requests receive none. Source transfers
+are checked, bounded and paged without truncation. Inspect existing source/schema
+before patching. Draft save and immutable publication each retain complete native
+review; publication never executes the flow. Newly published invocation normally
+uses the next turn's ordinary proposal route. Fixtures simulate supplied results
+and cannot dispatch live providers. Stop/timeout/authority changes retire original
+requests; unknown mutation outcomes are not automatically replayed.
+
+93 local Agent tests, final14client repeat and a separate two-test composition
+qualify source and scripted runtime routing. No actual hosted-model authoring,
+new installed app or grant was tested. Agent's whole-turn180-second bound can
+expire during long transfer/reviews; individual service deadlines are not promises
+of a longer Agent turn. Pages expire on catalog refresh. Native finiteDouble
+source is not portable Flow/n8n compatibility. See the linked host evidence.
+
+## November 3 local browser delivery
+
+Installed Agent0.5.28 retains the compiled0.5.20 program with reviewed chat resources. Its primary Task focus choices distinguish Chat, **Search the web** (model-side source retrieval), and **Use my browser** (the explicitly connected Chrome DevTools MCP session). Focus supplies per-request guidance; it is not a new permission boundary or proof of browser success. Existing reviews and tool-result verification remain authoritative.
+
+The local Chrome DevTools MCP1.12.0 installation is named **Use my browser · Chrome DevTools** in Tools. Connect starts the pinned local launcher; the server starts a visible temporary Chrome profile on its first browser call. It does not attach existing signed-in tabs or import browser/Codex credentials. Every call is reviewed; declared-read trust stays off. Telemetry, CrUX and JavaScript evaluation are disabled, as are unrelated profiling/network/memory/emulation tool categories. Existing web search remains separate and enabled. The connection must be explicitly reconnected after quitting Agent; prior operations are not replayed.
+
+Nero retains its own Mac tools for native applications and OS UI. Browser MCP cannot replace those. Stop retires a turn/request; it cannot undo an already submitted form. Initial native navigation/click/fill/apply and read-only-wait cancellation/recovery were exercised against authored local data. The initial shorter guidance misrouted one open-URL proposal to Mac tools; it was stopped unapproved. Detailed final-artifact checks and limits: `../../NeroNook/reports/agent-browser-mcp-2026-11-03/README.md`. No public distribution.
