@@ -4,6 +4,23 @@ import Combine
 import ModuleCore
 import NookPluginSDK
 
+/// Internal seam for the exact owned app-server surface. Scripted tests supply
+/// this protocol without reading credentials, starting a runtime or sending a
+/// model request. Production keeps the existing CodexClient implementation.
+@MainActor protocol AgentReasoningRuntime: AnyObject {
+    var directory: URL { get }
+    var tool: (([String: Any]) async throws -> [String: Any])? { get set }
+    var event: ((String, [String: Any]) -> Void)? { get set }
+    var failed: ((String) -> Void)? { get set }
+    func start(binary: URL) async throws
+    func request(_ method: String, _ params: [String: Any]) async throws -> [String: Any]
+    func stop()
+}
+extension AgentReasoningRuntime {
+    func request(_ method: String) async throws -> [String: Any] { try await request(method, [:]) }
+}
+extension CodexClient: AgentReasoningRuntime {}
+
 @MainActor final class AgentModel: ObservableObject {
     @Published var status = "Connect your ChatGPT account"
     @Published var email: String?
@@ -12,21 +29,22 @@ import NookPluginSDK
     @Published var prompt = ""
     @Published var reply = ""
     @Published var settingsVisible = false
-    @Published var runtimePath = UserDefaults.standard.string(forKey: "agent.runtimePath") ?? AgentRuntime.defaultBinary.path
+    @Published var runtimePath: String
     @Published var proposal: AgentAnswer?
     @Published var conversations: [Conversation] = []
     @Published var currentID = UUID()
-    @Published var retentionDays = UserDefaults.standard.integer(forKey: "agent.historyDays")
+    @Published var retentionDays: Int
     @Published var historyError: String?
     @Published private(set) var models: [AgentModelChoice] = []
     @Published private(set) var modelsLoading = false
     @Published private(set) var modelStatus = "Models load from your connected account"
-    @Published private(set) var selectedModel = UserDefaults.standard.string(forKey: "agent.selectedModel") ?? ""
+    @Published private(set) var selectedModel: String
+    private let defaults: any AgentPreferences
     private var modelCatalogGeneration = UUID()
     func chooseModel(_ value: String) throws {
         guard !busy, !connecting else { throw AgentError.message("Finish the current reply before switching models.") }
         try AgentModelChoice.validate(value, choices: models)
-        selectedModel = value; UserDefaults.standard.set(value, forKey: "agent.selectedModel")
+        selectedModel = value; defaults.set(value, forKey: "agent.selectedModel")
         modelStatus = value.isEmpty ? "Account default · next request" : "Selected model · next request"
     }
     func refreshModels() {
@@ -55,14 +73,22 @@ import NookPluginSDK
         }
     }
     var catalogForPlanner: (() -> [PluginCatalogEntry])?
-    private var plannerCatalog: [PluginCatalogEntry] { catalogForPlanner?() ?? catalog }
+    private var plannerCatalog: [PluginCatalogEntry] { AgentTools.ordinaryCatalog(catalogForPlanner?() ?? catalog) }
     var localContext: (() throws -> String)?
     var readAction: ((PluginCatalogEntry, [String: PluginValue]) async throws -> [String: PluginValue])?
+    var ownedReadAction: ((UUID, PluginCatalogEntry, [String: PluginValue]) async throws -> [String: PluginValue])?
     var cancelReads: (() -> Void)?
     var integrationDefinitions: (() -> [[String: Any]])?
     var integrationKeys: (() -> [String: Set<String>])?
     var integrationTool: ((String, [String: String]) async throws -> [String: Any])?
     var cancelIntegrations: (() -> Void)?
+    var flowToolsEnabled: (() -> Bool)?
+    var flowDefinitions: (() -> [[String: Any]])?
+    var flowKeys: (() -> [String: Set<String>])?
+    var flowTool: ((String, [String: String]) async throws -> [String: Any])?
+    var beginFlowTurn: (() -> Void)?
+    var cancelFlowTurn: (() -> Void)?
+    private var turnFlowKeys: [String: Set<String>] = [:]
     var webSearch: (() -> Bool)?
     private var turnIntegrationKeys: [String: Set<String>] = [:]
     private var turnWeb = false
@@ -73,6 +99,62 @@ import NookPluginSDK
     private var toolCalls = Set<String>()
     private var actionMessages: [UUID: (conversation: UUID, message: UUID)] = [:]
     private var proposalEntry: PluginCatalogEntry?
+    @Published private(set) var actionOutcomes = AgentActionOutcomes()
+    var hasPendingActionOutcomes: Bool { actionOutcomes.hasPending }
+    private var turnOutcomeOrigin: AgentActionOutcomes.Origin?
+    private var proposalOutcomeOrigin: AgentActionOutcomes.Origin?
+    private var outcomeRequest = "latest", outcomeField = "0", outcomePage = "0"
+    var actionOutcomeSelection: AgentActionOutcomes.Page? {
+        (try? actionOutcomes.page(conversationID: currentID, request: outcomeRequest,
+            field: outcomeField, page: outcomePage))
+            ?? (try? actionOutcomes.page(conversationID: currentID))
+    }
+    var actionOutcomeJSON: String {
+        guard let page = actionOutcomeSelection, let data = try? JSONEncoder().encode(page),
+              data.count <= 8192 else { return "" }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+    func actionOutcomeStopRequest(_ raw: String) throws -> UUID {
+        guard let id = UUID(uuidString: raw), let origin = actionOutcomes.origin(id),
+              origin.conversationID == currentID else { throw AgentActionOutcomes.Problem.unavailable }
+        let page = try actionOutcomes.page(conversationID: currentID, request: raw)
+        guard page.phase == PluginRunPhase.waitingReview.rawValue || page.phase == PluginRunPhase.running.rawValue else {
+            throw AgentActionOutcomes.Problem.unavailable
+        }
+        return id
+    }
+    func selectActionOutcome(command: String, value: String) throws {
+        let selected = actionOutcomeSelection
+        var request = selected?.request ?? "latest", field = String(selected?.field ?? 0), page = String(selected?.page ?? 0)
+        switch command {
+        case "outcome_request": request = value; field = "0"; page = "0"
+        case "outcome_field": field = value; page = "0"
+        case "outcome_page": page = value
+        default: throw AgentActionOutcomes.Problem.invalid
+        }
+        _ = try actionOutcomes.page(conversationID: currentID, request: request, field: field, page: page)
+        outcomeRequest = request; outcomeField = field; outcomePage = page; changed?()
+    }
+    func validateOwnedReadStart(_ request: UUID, entry: PluginCatalogEntry) throws {
+        guard busy, toolsEnabled, let origin = actionOutcomes.origin(request), origin == turnOutcomeOrigin,
+              currentID == origin.conversationID, actionOutcomes.entry(request) == entry,
+              catalog.contains(entry),
+              try actionOutcomes.page(conversationID: origin.conversationID, request: request.uuidString).phase == PluginRunPhase.waitingReview.rawValue else {
+            throw AgentActionOutcomes.Problem.unavailable
+        }
+    }
+    func beginActionOutcome(_ request: UUID, entry: PluginCatalogEntry, proposal: Bool = false) throws {
+        let origin = proposal ? proposalOutcomeOrigin : turnOutcomeOrigin
+        guard let origin, catalog.contains(entry),
+              conversations.contains(where: { $0.id == origin.conversationID && $0.messages.contains(where: { $0.id == origin.messageID }) }) else {
+            throw AgentActionOutcomes.Problem.unavailable
+        }
+        actionOutcomes.retainConversations(Set(conversations.map(\.id)))
+        try actionOutcomes.begin(requestID: request, entry: entry, origin: origin)
+        actionMessages[request] = (origin.conversationID, origin.messageID)
+        if currentID == origin.conversationID { outcomeRequest = "latest"; outcomeField = "0"; outcomePage = "0" }
+    }
+
     var voiceReply: ((UUID,String,Bool,Bool,Bool)->Void)?
     var voiceDelivery: ((UUID,PluginExpressionCue?)->Void)?
     private var voiceTargets: [UUID:(UUID,UUID)] = [:]
@@ -81,7 +163,7 @@ import NookPluginSDK
     @Published var catalog: [PluginCatalogEntry] = []
     private var turnCatalog: [PluginCatalogEntry] = []
     var states: [String: StateChannelReceipt] = [:]
-    private var client: CodexClient
+    private var client: any AgentReasoningRuntime
     private var connected = false
     private var loginID: String?
     private var loginGeneration = UUID()
@@ -98,11 +180,17 @@ import NookPluginSDK
     private var generation = UUID()
     private var deadline: Task<Void, Never>?
     private var observations = Set<AnyCancellable>()
-    init() {
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NeroNook-Plugins/cafe.nero.plugin.agent/codex-runtime")
-        historyFiles = ConversationFiles(file: root.deletingLastPathComponent().appendingPathComponent("conversations-v1.json"))
-        client = CodexClient(directory: root)
-        if retentionDays > 0, !CommandLine.arguments.contains("--protocol-test") {
+    init(runtime: (any AgentReasoningRuntime)? = nil, restoreState: Bool = true, defaults: UserDefaults? = nil, profile: AgentProfile? = nil) {
+        let preferences = profile?.preferences ?? AgentUserDefaultsPreferences(defaults ?? .standard)
+        self.defaults = preferences
+        let restoresProfileState = restoreState && profile?.restoreState != false
+        runtimePath = restoresProfileState ? (preferences.string(forKey: "agent.runtimePath") ?? AgentRuntime.defaultBinary.path) : AgentRuntime.defaultBinary.path
+        retentionDays = restoresProfileState ? preferences.integer(forKey: "agent.historyDays") : 0
+        selectedModel = restoresProfileState ? (preferences.string(forKey: "agent.selectedModel") ?? "") : ""
+        let root = profile?.runtimeDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NeroNook-Plugins/cafe.nero.plugin.agent/codex-runtime")
+        historyFiles = ConversationFiles(file: profile?.conversationFile ?? root.deletingLastPathComponent().appendingPathComponent("conversations-v1.json"))
+        client = runtime ?? CodexClient(directory: root, childHome: profile?.childHome)
+        if restoresProfileState, retentionDays > 0, !CommandLine.arguments.contains("--protocol-test") {
             do {
                 if let archive = try historyFiles.load() {
                     conversations = archive.conversations.filter { $0.updated > Date().addingTimeInterval(-Double(retentionDays) * 86400) }
@@ -118,7 +206,7 @@ import NookPluginSDK
         objectWillChange.debounce(for: .milliseconds(80), scheduler: RunLoop.main).sink { [weak self] _ in Task { @MainActor in self?.changed?() } }.store(in: &observations)
         // Restore only this plugin's existing login; never open a browser at startup.
         // Credential contents remain opaque and are read only by the owned runtime.
-        if !CommandLine.arguments.contains("--protocol-test"), FileManager.default.fileExists(atPath: root.appendingPathComponent("auth.json").path) {
+        if restoresProfileState, profile?.autoReconnect != false, !CommandLine.arguments.contains("--protocol-test"), FileManager.default.fileExists(atPath: root.appendingPathComponent("auth.json").path) {
             Task { [weak self] in self?.connect(allowSignIn: false) }
         }
     }
@@ -130,7 +218,7 @@ import NookPluginSDK
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             self.client.stop(); self.connected = false; self.email = nil; self.threadID = nil
-            self.runtimePath = url.path; UserDefaults.standard.set(url.path, forKey: "agent.runtimePath")
+            self.runtimePath = url.path; self.defaults.set(url.path, forKey: "agent.runtimePath")
             self.status = "Runtime selected. Reconnect your account."
         }
     }
@@ -183,7 +271,7 @@ import NookPluginSDK
     }
     func setRetention(_ days: Int) {
         guard [0, 7, 30].contains(days), !busy, historyError == nil else { return }
-        retentionDays = days; UserDefaults.standard.set(days, forKey: "agent.historyDays")
+        retentionDays = days; defaults.set(days, forKey: "agent.historyDays")
         persist()
     }
     private func persist() {
@@ -198,6 +286,13 @@ import NookPluginSDK
         conversations[i].update(message, text: text, phase: phase, activity: activity)
     }
     func invalidateLocalContext() { proposal = nil; proposalEntry = nil; if busy && toolsEnabled { cancel(); status = "Context access changed. Reply stopped; ask again with the current sources." } }
+    var hasFlowToolsForTurn: Bool { busy && !turnFlowKeys.isEmpty }
+    func invalidateFlowCatalog() {
+        // Changed or revoked catalog authority retires this model generation.
+        // Unrelated published wrappers do not interrupt their own publication;
+        // the stream client and host retain session and exact-descriptor fences.
+        if busy && !turnFlowKeys.isEmpty { cancel(); status = "Local flow access changed. Reply stopped; ask again with the current catalog." }
+    }
     func sendChat(_ text: String, useContext: Bool) {
         ask(text, useTools: useContext, interactive: true)
     }
@@ -234,12 +329,18 @@ import NookPluginSDK
         let actionData = turnCatalog.filter { $0.action != nil }.prefix(32).map { entry in ["address": entry.address.key, "title": entry.action!.title, "input": String(data: (try? JSONEncoder().encode(entry.action!.input)) ?? Data(), encoding: .utf8) ?? "{}"] }
         let actionJSON = String(data: (try? JSONSerialization.data(withJSONObject: actionData)) ?? Data(), encoding: .utf8) ?? "[]"
         let history = interactive ? conversation.context() : ""
-        turnIntegrationKeys = interactive && evidence == nil ? (integrationKeys?() ?? [:]) : [:]
-        turnWeb = interactive && evidence == nil && (webSearch?() ?? false)
-        self.interactive = interactive; toolsEnabled = interactive && useTools; toolCalls = []; deciding = decision; decisionValue = nil
+        turnIntegrationKeys = interactive && evidence == nil && !decision ? (integrationKeys?() ?? [:]) : [:]
+        turnWeb = interactive && evidence == nil && !decision && (webSearch?() ?? false)
+        let localFlows = AgentTools.flowToolsAllowed(interactive: interactive, nook: useTools, optIn: flowToolsEnabled?() ?? false, evidence: evidence != nil, decision: decision)
+        turnFlowKeys = localFlows ? (flowKeys?() ?? [:]) : [:]
+        if !turnFlowKeys.isEmpty { beginFlowTurn?() }
+        self.interactive = interactive; toolsEnabled = interactive && useTools && evidence == nil && !decision; toolCalls = []; deciding = decision; decisionValue = nil
         prompt = text; reply = ""; proposal = nil; proposalEntry = nil; busy = true; status = "Thinking…"; raw = ""; active = request; threadID = nil; turnID = nil
         if interactive, let i = conversations.firstIndex(where: { $0.id == currentID }) { replyID = conversations[i].begin(text, context: useTools); persist() }
         else { replyID = nil }
+        turnOutcomeOrigin = interactive && useTools && evidence == nil && !decision
+            ? replyID.map { .init(conversationID: currentID, messageID: $0) } : nil
+        proposalOutcomeOrigin = nil
         requestStartedAt=ProcessInfo.processInfo.systemUptime;firstReplyTimed=false;SpeechTiming.mark("requestStarted")
         let token = UUID(); generation = token
         deadline?.cancel(); deadline = Task { [weak self] in
@@ -254,10 +355,11 @@ import NookPluginSDK
                 if let evidence { parameters["baseInstructions"] = EvidenceAnswerDraft.instructions; _ = try PluginEvidenceChatContract.values(evidence, history: evidenceHistory) }
                 var definitions = toolsEnabled ? AgentTools.definitions : []
                 if !turnIntegrationKeys.isEmpty { definitions += integrationDefinitions?() ?? [] }
+                if !turnFlowKeys.isEmpty { definitions += flowDefinitions?() ?? [] }
                 if !definitions.isEmpty { parameters["dynamicTools"] = definitions }
                 parameters["config"] = ["web_search": turnWeb ? "live" : "disabled"]
                 if interactive && evidence == nil {
-                    parameters["baseInstructions"] = AgentConversationInstructions.make(nook: toolsEnabled, web: turnWeb, integrations: Set(turnIntegrationKeys.keys))
+                    parameters["baseInstructions"] = AgentConversationInstructions.make(nook: toolsEnabled, web: turnWeb, integrations: Set(turnIntegrationKeys.keys), localFlows: !turnFlowKeys.isEmpty)
                     parameters["baseInstructions"] = (parameters["baseInstructions"] as? String ?? "") + "\n\n" + AgentAnswer.deliveryInstructions
                     if voiceQuick { parameters["baseInstructions"] = (parameters["baseInstructions"] as? String ?? "") + "\n\n" + SpokenReplyPolicy.instructions }
                 }
@@ -283,15 +385,22 @@ import NookPluginSDK
         }
     }
     private func tool(_ params: [String: Any]) async throws -> [String: Any] {
-        let (name, args, call) = try AgentTools.validate(params, thread: threadID, turn: turnID, enabled: busy && (toolsEnabled || !turnIntegrationKeys.isEmpty), additional: turnIntegrationKeys)
+        let (name, args, call) = try AgentTools.validate(params, thread: threadID, turn: turnID, enabled: busy && (toolsEnabled || !turnIntegrationKeys.isEmpty), additional: turnIntegrationKeys, flow: turnFlowKeys)
         guard toolCalls.count < 48, toolCalls.insert(call).inserted else { throw AgentError.message("This turn's tool limit was reached or the call was already handled.") }
         guard toolsEnabled || turnIntegrationKeys[name] != nil else { throw AgentError.message("Nook context is off for this turn.") }
         let token = generation
         var activity = ChatActivity(id: call, title: name == "nook_capabilities" ? "Checking available Nook tools" : "Reading Nook context")
         if let address = args["address"], let entry = catalog.first(where: { $0.address.key == address }) { activity.title = entry.action?.title ?? entry.channel?.title ?? activity.title }
         if turnIntegrationKeys[name] != nil { activity.title = name.hasPrefix("mac_") ? "Mac · " + name.replacingOccurrences(of: "mac_", with: "").replacingOccurrences(of: "_", with: " ") : "MCP · " + name.replacingOccurrences(of: "mcp_", with: "").replacingOccurrences(of: "_", with: " ") }
+        if turnFlowKeys[name] != nil { activity.title = "Local flows · " + name.replacingOccurrences(of: "nook_flow_", with: "").replacingOccurrences(of: "_", with: " ") }
         status = activity.title + "…"; changeReply(activity: activity)
         do {
+            if turnFlowKeys[name] != nil {
+                guard let flowTool else { throw AgentError.message("Local flow tools are unavailable.") }
+                let result = try await flowTool(name, args)
+                guard generation == token, busy else { throw CancellationError() }
+                activity.phase = (result["success"] as? Bool == false) ? "failed" : "complete"; changeReply(activity: activity); status = "Thinking…"; return result
+            }
             if turnIntegrationKeys[name] != nil {
                 guard let integrationTool else { throw AgentError.message("Integration unavailable.") }
                 let result = try await integrationTool(name, args)
@@ -306,14 +415,27 @@ import NookPluginSDK
                 var entries = Array(plannerCatalog.prefix(64))
                 while try JSONEncoder().encode(entries).count > 22000 { entries.removeLast() }
                 output = String(data: try JSONEncoder().encode(entries), encoding: .utf8) ?? "[]"
+            case "nook_action_result":
+                guard let origin = turnOutcomeOrigin, currentID == origin.conversationID else {
+                    throw AgentActionOutcomes.Problem.unavailable
+                }
+                output = try actionOutcomes.json(conversationID: origin.conversationID,
+                    request: args["request"]!, field: args["field"]!, page: args["page"]!)
             case "nook_read_state":
                 let address = args["address"]!
                 guard plannerCatalog.contains(where: { $0.address.key == address && $0.channel?.kind == .state }), let state = states[address], state.expires > Date() else { throw AgentError.message("State is unavailable, expired, or access was revoked.") }
                 output = String(data: try JSONEncoder().encode(state.values), encoding: .utf8) ?? "{}"
             default:
                 let (entry, values) = try AgentTools.readAction(args["address"]!, arguments: args["arguments"]!, catalog: plannerCatalog)
-                guard let readAction else { throw AgentError.message("Connect this module to NeroNook to use tools.") }
-                let result = try await readAction(entry, values)
+                let result: [String: PluginValue]
+                if let ownedReadAction {
+                    // Bind request and origin before crossing this async callback.
+                    let request = UUID(); try beginActionOutcome(request, entry: entry)
+                    result = try await ownedReadAction(request, entry, values)
+                } else {
+                    guard let readAction else { throw AgentError.message("Connect this module to NeroNook to use tools.") }
+                    result = try await readAction(entry, values)
+                }
                 guard plannerCatalog.contains(entry) else { throw AgentError.message("Access changed while reading. Result discarded.") }
                 output = String(data: try JSONEncoder().encode(result), encoding: .utf8) ?? "{}"
             }
@@ -331,26 +453,34 @@ import NookPluginSDK
               let result = try proposal.proposal(catalog: plannerCatalog), result.0 == expected else { throw AgentError.message("The action or its access changed. Ask for a new proposal.") }
         return result
     }
-    func actionProgress(_ request: UUID, _ update: PluginRunUpdate) {
+    func acceptedActionOutcome(_ request: UUID) -> [String: PluginValue]? {
+        actionOutcomes.succeededValues(requestID: request, currentCatalog: catalog)
+    }
+    @discardableResult func actionProgress(_ request: UUID, _ update: PluginRunUpdate) -> AgentActionOutcomes.Completion? {
+        guard let completion = actionOutcomes.receiveWithOutcome(requestID: request, update: update, currentCatalog: catalog) else { return nil }
+        let origin = completion.origin, phase = completion.phase
         let titles: [PluginRunPhase: String] = [.waitingReview: "Waiting for your review", .running: "Running action…", .cancelling: "Stopping action…", .succeeded: "Action completed", .failed: "Action failed", .cancelled: "Action cancelled", .interrupted: "Action interrupted"]
-        status = update.message.isEmpty ? (titles[update.phase] ?? "Action update") : update.message
-        if actionMessages[request] == nil, let replyID { actionMessages[request] = (currentID, replyID) }
-        if let target = actionMessages[request], let index = conversations.firstIndex(where: { $0.id == target.conversation }) {
-            conversations[index].update(target.message, activity: .init(id: request.uuidString, title: status, phase: update.phase.rawValue))
+        let label = titles[phase] ?? "Action update"
+        // No raw result or provider text goes into persisted conversation activity.
+        if currentID == origin.conversationID { status = label }
+        if let index = conversations.firstIndex(where: { $0.id == origin.conversationID }) {
+            conversations[index].update(origin.messageID, activity: .init(id: request.uuidString, title: label, phase: phase.rawValue))
         }
-        if update.phase.terminal { actionMessages[request] = nil }; persist()
+        if phase.terminal { actionMessages[request] = nil }
+        changed?(); persist()
+        return completion
     }
     func cancel(request: UUID? = nil) {
         guard busy else { return }
         if let request, request != active { return }
         let thread = threadID, turn = turnID
-        generation = UUID(); cancelReads?(); cancelIntegrations?()
+        generation = UUID(); cancelReads?(); cancelIntegrations?(); cancelFlowTurn?()
         if let thread, let turn { Task { _ = try? await client.request("turn/interrupt", ["threadId": thread, "turnId": turn]) } }
         else { client.stop(); connected = false; email = nil }
         finish(.cancelled, "Stopped"); threadID = nil
         if !connected { connect(allowSignIn: false) }
     }
-    func shutdown() { modelCatalogGeneration = UUID(); loginGeneration = UUID(); generation = UUID(); deadline?.cancel(); cancelReads?(); cancelIntegrations?(); persist(); client.stop() }
+    func shutdown() { actionOutcomes.clear(); actionMessages.removeAll(); turnOutcomeOrigin = nil; proposalOutcomeOrigin = nil; modelCatalogGeneration = UUID(); loginGeneration = UUID(); generation = UUID(); deadline?.cancel(); cancelReads?(); cancelIntegrations?(); cancelFlowTurn?(); persist(); client.stop() }
     private func receive(_ method: String, _ params: [String: Any]) {
         if method == "account/login/completed", params["loginId"] as? String == loginID {
             loginID = nil; connecting = false
@@ -387,6 +517,7 @@ import NookPluginSDK
                     if let active, interactive { voiceDelivery?(active,PluginExpressionCue.named(answer.delivery)) }
                     decisionValue = answer.decision; reply = answer.reply
                     proposal = interactive && !deciding && proposed != nil ? answer : nil; proposalEntry = proposal == nil ? nil : proposed?.0
+                    proposalOutcomeOrigin = proposal == nil ? nil : turnOutcomeOrigin
                     finish(.succeeded, proposal == nil ? "Ready" : "Proposal ready · nothing has run")
                 } catch { finish(.failed, "The response could not be validated. No action was run.") }
             } else { finish(.failed, "Codex could not finish this reply. Check your connection or account access.") }
@@ -394,7 +525,7 @@ import NookPluginSDK
     }
     private func finish(_ phase: PluginRunPhase, _ message: String) {
         if busy {SpeechTiming.mark("replyFinished",milliseconds:1000*(ProcessInfo.processInfo.systemUptime-requestStartedAt))}
-        deadline?.cancel(); deadline = nil; cancelReads?(); cancelIntegrations?(); status = String(message.prefix(300)); busy = false; turnID = nil
+        deadline?.cancel(); deadline = nil; cancelReads?(); cancelIntegrations?(); cancelFlowTurn?(); turnFlowKeys = [:]; status = String(message.prefix(300)); busy = false; turnID = nil
         changeReply(reply.isEmpty && phase != .succeeded ? status : reply, phase: phase == .succeeded ? "complete" : phase == .cancelled ? "stopped" : "failed")
         if let i = conversations.firstIndex(where: { $0.id == currentID }), let replyID, let j = conversations[i].messages.firstIndex(where: { $0.id == replyID }) {
             for k in conversations[i].messages[j].activities.indices where conversations[i].messages[j].activities[k].phase == "running" { conversations[i].messages[j].activities[k].phase = phase == .cancelled ? "stopped" : "failed" }
